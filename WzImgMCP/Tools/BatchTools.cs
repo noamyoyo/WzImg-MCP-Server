@@ -380,17 +380,54 @@ public class BatchTools
     }
 }
 
-// Placeholder classes for WZ extraction/packing (would need actual implementation in MapleLib)
 public class WzExtractor
 {
     public ExtractionResult ExtractToImgFileSystem(string wzPath, string outputDir, string? versionKey, bool createManifest)
     {
-        // This would need to be implemented in MapleLib
-        // For now, return a not-implemented result
+        var isFile = File.Exists(wzPath);
+        var baseDir = isFile ? Path.GetDirectoryName(Path.GetFullPath(wzPath))! : wzPath;
+
+        MapleLib.WzLib.WzMapleVersion encryption;
+        short detectedVersion = 0;
+        if (!string.IsNullOrEmpty(versionKey))
+        {
+            if (!Enum.TryParse(versionKey, true, out encryption))
+            {
+                return new ExtractionResult
+                {
+                    Success = false,
+                    ErrorMessage = $"Unknown encryption '{versionKey}' — use one of: {string.Join(", ", Enum.GetNames<MapleLib.WzLib.WzMapleVersion>())}"
+                };
+            }
+        }
+        else
+        {
+            var probe = isFile ? wzPath : Directory.EnumerateFiles(baseDir, "*.wz").FirstOrDefault();
+            if (probe == null)
+            {
+                return new ExtractionResult { Success = false, ErrorMessage = $"No .wz files found in {wzPath}" };
+            }
+            encryption = MapleLib.WzLib.Util.WzTool.DetectMapleVersion(probe, out detectedVersion);
+        }
+
+        var svc = new MapleLib.Img.WzExtractionService();
+        MapleLib.Img.ExtractionResult res = isFile
+            ? svc.ExtractAsync(baseDir, outputDir, "v83", "WzImgMCP export", encryption,
+                new[] { Path.GetFileNameWithoutExtension(wzPath) }).GetAwaiter().GetResult()
+            : svc.ExtractAsync(baseDir, outputDir, "v83", "WzImgMCP export", encryption).GetAwaiter().GetResult();
+
+        var errors = res.CategoriesExtracted
+            .SelectMany(kv => kv.Value.Errors.Select(e => $"{kv.Key}: {e}"))
+            .ToList();
         return new ExtractionResult
         {
-            Success = false,
-            ErrorMessage = "WZ extraction not yet implemented. Use external tools or HaRepacker GUI."
+            // The service's own Success flag fails required-files validation on partial
+            // (single-category) extractions; images written with no errors is the real signal.
+            Success = res.TotalImagesExtracted > 0 && errors.Count == 0,
+            ErrorMessage = res.TotalImagesExtracted == 0 ? (res.ErrorMessage ?? "No images extracted") : res.ErrorMessage,
+            CategoriesExtracted = res.CategoriesExtracted.Count,
+            ImagesExtracted = res.TotalImagesExtracted,
+            Errors = errors
         };
     }
 }
@@ -399,12 +436,28 @@ public class WzPacker
 {
     public PackingResult PackToWz(string imgPath, string outputDir, int wzVersion, string? category)
     {
-        // This would need to be implemented in MapleLib
-        // For now, return a not-implemented result
+        var svc = new MapleLib.Img.WzPackingService();
+        var categories = category != null
+            ? new[] { category }
+            : Directory.GetDirectories(imgPath).Select(Path.GetFileName).ToArray()!;
+        if (categories.Length == 0)
+        {
+            return new PackingResult { Success = false, ErrorMessage = $"No category directories found in {imgPath}" };
+        }
+
+        var res = svc.PackCategoriesAsync(imgPath, outputDir, categories,
+            overridePatchVersion: (short)wzVersion).GetAwaiter().GetResult();
+
+        var errors = res.CategoriesPacked
+            .SelectMany(kv => kv.Value.Errors.Select(e => $"{kv.Key}: {e}"))
+            .ToList();
         return new PackingResult
         {
-            Success = false,
-            ErrorMessage = "WZ packing not yet implemented. Use external tools or HaRepacker GUI."
+            Success = res.Success,
+            ErrorMessage = res.ErrorMessage,
+            FilesCreated = res.CategoriesPacked.Count(kv => kv.Value.Success),
+            TotalSize = res.TotalOutputSize,
+            Errors = errors
         };
     }
 }

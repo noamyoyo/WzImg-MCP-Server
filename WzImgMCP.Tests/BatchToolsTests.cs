@@ -15,13 +15,41 @@ public class BatchToolsTests : IClassFixture<TestFixture>
     }
 
     [Fact]
-    public void ExtractAndPack_CurrentlyNotImplemented_ReturnFailures()
+    public void PackToWz_CreatesWzFileFromImgFilesystem()
     {
-        var extract = _tools.ExtractToImg(_fixture.TestDataPath, Path.Combine(Path.GetTempPath(), "wz_extract_" + Guid.NewGuid().ToString("N")));
-        MarkdownTestHelper.AssertFailure(extract);
+        var packDir = Path.Combine(Path.GetTempPath(), "wz_pack_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var pack = _tools.PackToWz(_fixture.TestDataPath, packDir, wzVersion: 83, category: "Character");
+            MarkdownTestHelper.AssertSuccess(pack);
+            Assert.True(File.Exists(Path.Combine(packDir, "Character.wz")), "Character.wz not created");
+        }
+        finally
+        {
+            if (Directory.Exists(packDir)) Directory.Delete(packDir, true);
+        }
+    }
 
-        var pack = _tools.PackToWz(_fixture.TestDataPath, Path.Combine(Path.GetTempPath(), "wz_pack_" + Guid.NewGuid().ToString("N")));
-        MarkdownTestHelper.AssertFailure(pack);
+    [Fact]
+    public void ExtractToImg_RoundTripsPackedWz()
+    {
+        var packDir = Path.Combine(Path.GetTempPath(), "wz_pack_" + Guid.NewGuid().ToString("N"));
+        var extractDir = Path.Combine(Path.GetTempPath(), "wz_extract_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var pack = _tools.PackToWz(_fixture.TestDataPath, packDir, wzVersion: 83, category: "Character");
+            MarkdownTestHelper.AssertSuccess(pack);
+
+            var extract = _tools.ExtractToImg(Path.Combine(packDir, "Character.wz"), extractDir, versionKey: "BMS");
+            MarkdownTestHelper.AssertSuccess(extract);
+            Assert.True(File.Exists(Path.Combine(extractDir, "Character", "Test.img")),
+                "extracted img filesystem missing Character/Test.img");
+        }
+        finally
+        {
+            if (Directory.Exists(packDir)) Directory.Delete(packDir, true);
+            if (Directory.Exists(extractDir)) Directory.Delete(extractDir, true);
+        }
     }
 
     [Fact]

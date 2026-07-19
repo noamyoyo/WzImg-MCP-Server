@@ -69,7 +69,7 @@ class Program
         builder.Logging.SetMinimumLevel(LogLevel.Information);
 
         // Configure URLs
-        builder.WebHost.UseUrls($"http://localhost:{port}");
+        builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
         // Register services
         builder.Services.AddSingleton<WzSessionManager>();
