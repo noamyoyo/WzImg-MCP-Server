@@ -240,6 +240,10 @@ public class BatchTools
                 // Directories are created lazily, after the final file path passed the path guard.
                 var categoryDir = Path.Combine(outputDir, category);
 
+                // One directory per image: images in different sub directories can share a file name, and different
+                // names can sanitise to the same one, so the directory names are made unique per category.
+                var imageDirNames = new HashSet<string>(StringComparer.Ordinal);
+
                 foreach (var img in ds.GetImagesInCategory(category))
                 {
                     if (totalExported >= maxImages) break;
@@ -249,7 +253,8 @@ public class BatchTools
                         var wasParsed = img.Parsed;
                         if (!img.Parsed) img.ParseImage();
 
-                        var imageDir = Path.Combine(categoryDir, PathGuard.SanitizeFileName(Path.GetFileNameWithoutExtension(img.Name), "image"));
+                        var imageDir = Path.Combine(categoryDir, PathGuard.UniqueName(
+                            PathGuard.SanitizeFileName(Path.GetFileNameWithoutExtension(img.Name), "image"), imageDirNames));
                         ExportCanvasesFromImage(img, imageDir, extension, exported, failed, ref totalExported, maxImages);
 
                         if (!wasParsed) img.UnparseImage();
