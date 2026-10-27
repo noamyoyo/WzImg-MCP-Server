@@ -100,13 +100,34 @@ public static class PathGuard
     public static string SanitizeFileName(string? text, string fallback = "unnamed")
     {
         var sb = new System.Text.StringBuilder();
-        foreach (var ch in text ?? "")
-            sb.Append(ch is '/' or '\\' or ':' || char.IsControl(ch) ? '_' : ch);
-        var s = sb.ToString().Replace("..", "__").Trim();
-        if (s.Length > 150) s = s.Substring(0, 150);
+        foreach (var rune in (text ?? "").EnumerateRunes())   // an unpaired surrogate comes out as U+FFFD, so the result is valid UTF-8
+            sb.Append(rune.Value is '/' or '\\' or ':' || System.Text.Rune.IsControl(rune) ? "_" : rune.ToString());
+        var s = TruncateUtf8(sb.ToString().Replace("..", "__").Trim(), MaxNameBytes);
         s = s.TrimEnd('.', ' ');
         if (s.Trim('.').Length == 0) return fallback;
         return IsReservedDeviceName(s) ? "_" + s : s;
+    }
+
+    /// <summary>
+    /// Longest sanitised name in UTF-8 bytes. File systems limit a name to 255 bytes, not characters; this leaves
+    /// room for a "_NNN" uniqueness suffix and an extension.
+    /// </summary>
+    public const int MaxNameBytes = 150;
+
+    /// <summary>Cuts <paramref name="s"/> to at most <paramref name="maxBytes"/> UTF-8 bytes without splitting a character.</summary>
+    private static string TruncateUtf8(string s, int maxBytes)
+    {
+        if (System.Text.Encoding.UTF8.GetByteCount(s) <= maxBytes)
+            return s;
+        var sb = new System.Text.StringBuilder();
+        int bytes = 0;
+        foreach (var rune in s.EnumerateRunes())
+        {
+            bytes += rune.Utf8SequenceLength;
+            if (bytes > maxBytes) break;
+            sb.Append(rune.ToString());
+        }
+        return sb.ToString();
     }
 
     private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
