@@ -250,7 +250,8 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     name (no separator, `..`, drive prefix, rooted path or control character), also without `WZIMG_ALLOWED_ROOT`. Before, a category such
     as `../img/Map` put the packer output (`Map.wz`, `Data/Map`) outside the allowed root. `pack_to_wz` also resolves every file and
     directory the packer writes (`Category.wz`, `Category`, `Data/Category`, `Data`, `Data.wz`, `List.wz`) through `PathGuard.Resolve` before
-    anything is created, and `WzPackingService.PackCategoryAsync` refuses a non-plain category itself.
+    anything is created, and `WzPackingService.PackCategoryAsync` refuses a non-plain category itself. Symbolic links planted inside the
+    output tree (`Data/<category>`, `Data/<category>/_Canvas` and the files in them) and the writes themselves are item 29.
 24. **Server: `PathGuard.WriteFileGuarded` and the single-file exports** (`export_png`, `export_mp3`, `export_to_md`) write to a new file next
     to the target and rename it over the target, and refuse a symbolic link at the target, so a link planted between the path check and
     the write is never followed.
@@ -262,6 +263,24 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     optional `dxt3Grayscale` argument.
 27. **Server: `get_sound_data` and `resolve_sound_link`** omit the base64 audio data (with a `Truncated` note) above `WZIMG_MAX_RESPONSE_BYTES`.
 28. **Server: `export_to_md`** changes the extension to `.md` before the path guard resolves the path.
+
+    Fix after the third review of the packer:
+
+29. **Server and MapleLib: the packer and the extractor do not write through a symbolic link.** MapleLib's `NoFollowFile` helper writes each
+    output file (`Category.wz`, `Category_NNN.wz`, `List_000.wz`, `Canvas.ini`, `_Canvas_NNN.wz`, the extracted `.img` files and the data-source
+    saves) to a new file with a random name next to the target and renames it over the target; a symbolic link at the target (also a
+    dangling one) is refused with an error, never followed. Before `pack_to_wz` creates anything, `PathGuard.Resolve` also checks
+    `Data/<category>` and `Data/<category>/_Canvas`, and every symbolic link found inside them, so a link that leads outside the allowed
+    root is refused with a message that names the path (`BatchTools.GuardPackOutputs`). This is a check of the state at that moment; the
+    write itself stays safe even if a link appears afterwards. Residuals that are not fixed:
+    - a symbolic link swapped into a **parent** directory of the output after the check is still followed (closing that needs `openat` on
+      the directory);
+    - the rename gives the output file the default permissions and owner of a new file, not those of the file it replaced;
+    - a crash between the create and the rename can leave a `.<guid>.tmp` file in the output directory;
+    - the audio size cap (`WZIMG_MAX_RESPONSE_BYTES`) applies after `GetBytes` has loaded the sound, so a very large sound is read into memory
+      before it is cut off.
+    - Old behaviour that was left alone: `pack_to_wz` with `saveAs64Bit` reports a failure although it wrote the files (it counts only
+      top-level `*.wz` files).
 
 Path audit of the tools: the only tool code that joins a user supplied string into a path with `Path.Combine` is in `BatchTools`
 (`batch_export_images` category: checked as a plain name; image directory and canvas file names: sanitised, unique, and written through
@@ -277,9 +296,9 @@ combined path against the version directory (lexically, symbolic links inside th
   built without `LINUX_BUILD` against System.Drawing.Common), never run; the Windows build of the whole solution could
   not be built here. The changes to MapleLib's encoders keep the same `LockBits` call on Windows but were not run
   there.
-- Tests on Linux: 357 tests (159 before the first review fixes, 268 before the second); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
-  354 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
-  and Morph.wz 352 pass and 5 skip; without the variable 333 pass and 24 skip. Tests that need symbolic links are reported as
+- Tests on Linux: 394 tests (159 before the first review fixes, 268 before the second, 357 before the third); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
+  391 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
+  and Morph.wz 389 pass and 5 skip; without the variable 368 pass and 26 skip. Tests that need symbolic links are reported as
   skipped (not passed) where links cannot be created. All 29 upstream tests that failed in
   Phase 1 (they share `TestFixture`, which created a `System.Drawing.Bitmap`) now pass, because the fixture uses the raw
   pixel API under `LINUX_BUILD`. Two Phase 1 tests (`PlatformSupportTests`) were deleted with the stub they tested.

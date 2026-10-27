@@ -126,7 +126,9 @@ public class BatchTools
 
             // The category names become output file and directory names ({category}.wz, Data/{category}):
             // only plain names are accepted, and every output path is resolved through the path guard
-            // (symlinks followed) before a directory is created or the packer writes anything.
+            // (symlinks followed) before a directory is created or the packer writes anything. GuardPackOutputs also
+            // refuses symbolic links found inside Data/<category> and Data/<category>/_Canvas that lead outside the
+            // root; the packer's own writes (MapleLib NoFollowFile) never write through a link either way.
             var categoriesToPack = GetPackingCategories(imgPath, category);
             RequireSafeCategories(categoriesToPack);
             if (categoriesToPack.Count == 0)
