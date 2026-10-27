@@ -1,4 +1,4 @@
-﻿﻿using System.ComponentModel;
+﻿using System.ComponentModel;
 using ModelContextProtocol.Server;
 using System.Drawing;
 using System.Drawing.Imaging;

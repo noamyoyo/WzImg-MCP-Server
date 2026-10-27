@@ -73,6 +73,29 @@ public static class CanvasImaging
         ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
 
     /// <summary>
+    /// Reads a stream to its end but never more than <paramref name="limit"/> + 1 bytes; throws when the stream holds more
+    /// than <paramref name="limit"/> bytes.
+    /// </summary>
+    public static byte[] ReadAtMost(Stream stream, long limit, string what)
+    {
+        using var ms = new MemoryStream();
+        var chunk = new byte[81920];
+        long total = 0;
+        while (true)
+        {
+            int want = (int)Math.Min(chunk.Length, limit + 1 - total);
+            if (want <= 0) break;
+            int read = stream.Read(chunk, 0, want);
+            if (read <= 0) break;
+            ms.Write(chunk, 0, read);
+            total += read;
+        }
+        if (total > limit)
+            throw new ImageRejectedException($"{what} is too large: more than {limit} bytes, the limit is {limit} bytes.");
+        return ms.ToArray();
+    }
+
+    /// <summary>
     /// Returns the PNG bytes given either as base64 or as a file path. A path must lie inside
     /// WZIMG_ALLOWED_ROOT (when set). Exactly one of the two must be given. Size limits are enforced before the
     /// data is read or decoded.
@@ -92,7 +115,10 @@ public static class CanvasImaging
                 throw new FileNotFoundException($"PNG file not found: {pngPath}");
             if (info.Length > MaxImportBytes)
                 throw new ImageRejectedException($"PNG file is too large: {info.Length} bytes, the limit is {MaxImportBytes} bytes.");
-            return File.ReadAllBytes(resolved);
+            // Read with a hard limit instead of trusting the length that was checked a moment ago: the file may have grown
+            // since (or be a stream that never ends), so never take more than limit + 1 bytes.
+            using var stream = new FileStream(resolved, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return ReadAtMost(stream, MaxImportBytes, "PNG file");
         }
 
         // 4 base64 characters carry 3 bytes; refuse before allocating the decoded buffer.
