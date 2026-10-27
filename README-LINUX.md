@@ -91,7 +91,7 @@ What to know about the formats:
 - DXT3 and DXT5 need a width and height that are multiples of 4; `format=dxt3` / `dxt5` on other sizes is refused with
   a clear message. `format=auto` never picks DXT (see `WZIMG_PRE_BIG_BANG`).
 - A canvas that has an `_inlink` / `_outlink` child is displayed and exported from the link target. `set_canvas_bitmap`
-  writes the canvas's own pixel data, so such a canvas keeps showing the linked image until the link is removed.
+  writes the canvas's own pixel data, so such a canvas keeps showing the linked image until the link is removed; the result carries a `warning` that says so (the call still succeeds).
 - PNG files written by Skia are not byte-identical to GDI+'s output, only pixel-identical. `view_canvas` scaling uses a
   linear/mipmap filter (the Windows branch uses bicubic).
 - Code that still needs GDI+ and is not reachable from any MCP tool: the XML / PNG-folder serializers, the NX

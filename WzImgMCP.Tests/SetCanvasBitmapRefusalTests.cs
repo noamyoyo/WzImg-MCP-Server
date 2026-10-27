@@ -102,4 +102,33 @@ public sealed class SetCanvasBitmapRefusalTests : IClassFixture<TestFixture>, ID
         Assert.Equal((6, 3), (canvas.PngProperty.Width, canvas.PngProperty.Height));
         Assert.Equal(WzPngFormat.Format2, canvas.PngProperty.Format);
     }
+
+    [Theory]
+    [InlineData("_inlink", "testCanvas")]
+    [InlineData("_outlink", "Map/Back/somewhere.img/back/0")]
+    public void SetCanvasBitmap_OnALinkedCanvas_Succeeds_ButWarnsThatTheLinkTargetIsStillShown(string linkName, string target)
+    {
+        var canvas = AddCanvas("linked_" + linkName.TrimStart('_'));
+        canvas.AddProperty(new WzStringProperty(linkName, target));
+
+        var r = _modify.SetCanvasBitmap(Cat, Img, canvas.Name, GoodPng(5, 5));
+
+        MarkdownTestHelper.AssertSuccess(r);
+        var warning = MarkdownTestHelper.GetFirstValue(r, "warning");
+        Assert.NotNull(warning);
+        Assert.Contains("link", warning);
+        Assert.Contains(linkName, warning);
+        Assert.Contains(target, warning);
+        Assert.Contains("link target", warning);
+        Assert.Equal((5, 5), (canvas.PngProperty.Width, canvas.PngProperty.Height));   // the pixels were stored
+    }
+
+    [Fact]
+    public void SetCanvasBitmap_OnAPlainCanvas_HasNoLinkWarning()
+    {
+        var canvas = AddCanvas("notLinked");
+        var r = _modify.SetCanvasBitmap(Cat, Img, canvas.Name, GoodPng());
+        MarkdownTestHelper.AssertSuccess(r);
+        Assert.Null(MarkdownTestHelper.GetFirstValue(r, "warning"));
+    }
 }

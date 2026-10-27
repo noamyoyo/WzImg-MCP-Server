@@ -423,7 +423,7 @@ public class ModifyTools
         }
     }
 
-    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. Unless format is given, the canvas keeps the pixel format it has (bgra8888 for a canvas without pixels), so export, edit and import does not change the format; 4444, 565, 1555 and DXT formats are lossy.")]
+    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG (a canvas with an _inlink / _outlink keeps displaying its link target: the result then carries a warning). Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. Unless format is given, the canvas keeps the pixel format it has (bgra8888 for a canvas without pixels), so export, edit and import does not change the format; 4444, 565, 1555 and DXT formats are lossy.")]
     public string SetCanvasBitmap(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -464,7 +464,7 @@ public class ModifyTools
                 Path = path,
                 OldValue = oldSize,
                 NewValue = $"{newWidth}x{newHeight} ({prop.PngProperty.Format})",
-                Warning = note
+                Warning = CombineWarnings(note, LinkWarning(prop))
             };
         }
         catch (Exception ex)
@@ -750,6 +750,24 @@ public class ModifyTools
             return new DiscardResult { Success = false, Error = ex.Message };
         }
     }
+
+    /// <summary>
+    /// A canvas with an _inlink / _outlink child is shown and exported from the link target, so a new bitmap stored in
+    /// the canvas itself is not what viewers and the game display. Returns a warning for such canvases, else null.
+    /// </summary>
+    private static string? LinkWarning(WzCanvasProperty canvas)
+    {
+        var inlink = (canvas["_inlink"] as WzStringProperty)?.Value;
+        var outlink = (canvas["_outlink"] as WzStringProperty)?.Value;
+        if (inlink == null && outlink == null)
+            return null;
+        var kind = inlink != null ? "_inlink" : "_outlink";
+        return $"This canvas is a link ({kind} -> {inlink ?? outlink}): the new bitmap was stored in the canvas itself, but view_canvas, exports " +
+               "and the game keep showing the image of the link target. Remove the link property or change the target canvas to change what is displayed.";
+    }
+
+    private static string? CombineWarnings(string? a, string? b)
+        => a == null ? b : b == null ? a : a + " " + b;
 
     private static WzVectorProperty CreateVector(string name, string? value)
     {
