@@ -72,7 +72,7 @@ public class ExportTools
                 {
                     Directory.CreateDirectory(dir);
                 }
-                File.WriteAllText(outputPath, markdownString);
+                PathGuard.WriteFileNoFollow(outputPath, new System.Text.UTF8Encoding(false).GetBytes(markdownString));
 
                 return new ExportMarkdownResult
                 {
@@ -146,7 +146,7 @@ public class ExportTools
                 Directory.CreateDirectory(dir);
             }
 
-            File.WriteAllBytes(outputPath, png);
+            PathGuard.WriteFileNoFollow(outputPath, png);
 
             return new ExportPngResult
             {
@@ -198,7 +198,7 @@ public class ExportTools
                 Directory.CreateDirectory(dir);
             }
 
-            File.WriteAllBytes(outputPath, data);
+            PathGuard.WriteFileNoFollow(outputPath, data);
 
             return new ExportMp3Result
             {

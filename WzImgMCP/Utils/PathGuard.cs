@@ -125,8 +125,34 @@ public static class PathGuard
         var finalDir = Path.GetDirectoryName(finalPath);
         if (!string.IsNullOrEmpty(finalDir) && !Directory.Exists(finalDir))
             Directory.CreateDirectory(finalDir);
-        File.WriteAllBytes(finalPath, data);
+        WriteFileNoFollow(finalPath, data);
         return finalPath;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="data"/> to <paramref name="resolvedPath"/> (already resolved through <see cref="Resolve(string)"/>)
+    /// without ever following a symbolic link at that path. <see cref="Resolve(string)"/> and the write are two steps, so a
+    /// link planted in between would be followed by a plain File.WriteAllBytes. Here the bytes go to a new file
+    /// (<see cref="FileMode.CreateNew"/>, never follows a link) next to the target, which then replaces the target by a
+    /// rename; a rename replaces a link itself and never writes through it. A link found at the target is refused.
+    /// </summary>
+    public static void WriteFileNoFollow(string resolvedPath, byte[] data)
+    {
+        if (new FileInfo(resolvedPath).LinkTarget != null)
+            throw new PathNotAllowedException($"path outside allowed root: refusing to write through the symbolic link {resolvedPath}");
+
+        var temp = Path.Combine(Path.GetDirectoryName(resolvedPath) ?? ".", "." + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                stream.Write(data, 0, data.Length);
+            File.Move(temp, resolvedPath, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(temp); } catch { }
+            throw;
+        }
     }
 
     private static bool IsInside(string root, string candidate)
