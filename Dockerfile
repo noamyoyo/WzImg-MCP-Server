@@ -7,8 +7,9 @@
 #
 # The server has no authentication of its own. Do not publish the port to an untrusted network;
 # put it behind the MCP hub / a private Docker network. File access is limited to /data
-# (WZIMG_ALLOWED_ROOT). Keep extracted trees in a sub-directory of /data (e.g. /data/v83/String):
-# edit backups are written next to the tree's parent directory.
+# (WZIMG_ALLOWED_ROOT). Keep extracted trees in a sub-directory of /data (e.g. /data/v83): when the
+# allowed root is set, edit backups are written to a Backups directory inside the extracted tree
+# (/data/v83/Backups), which category listing and packing skip.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
