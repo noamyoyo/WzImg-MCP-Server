@@ -20,10 +20,26 @@ Licences, as found in the files of this repository (this is a statement of what 
 Image library added in the Linux fork (Phase 2), as declared in the NuGet package metadata
   SkiaSharp                                    3.119.4   licence expression MIT, authors Microsoft,
   SkiaSharp.NativeAssets.Linux.NoDependencies  3.119.4   copyright (c) Microsoft Corporation
-                                               The native package ships THIRD-PARTY-NOTICES.txt for the components built
-                                               into libSkiaSharp.so (it has sections for skia, HarfBuzz and libpng, among
-                                               others). The Docker image copies LICENSE.txt and THIRD-PARTY-NOTICES.txt to
+                                               The native package ships THIRD-PARTY-NOTICES.txt (2,716 lines). Its sections
+                                               are: ANGLE, HarfBuzz, skia, etc1, gif, libpng, DNG SDK, expat, FreeType,
+                                               ICU, imgui, jsoncpp, libjpeg-turbo, libwebp, libmicrohttpd, piex, sdl,
+                                               sfntly, SPIR-V Headers, SPIR-V Tools and zlib. The notice is shared by the
+                                               SkiaSharp and HarfBuzzSharp native builds and does not say which sections
+                                               apply to which library. Strings in libSkiaSharp.so show FreeType, libpng
+                                               1.6.58, libjpeg-turbo 2.1.5.1, libwebp and zlib code in it; the other
+                                               sections (expat among them) were not checked against the binary, and all
+                                               of them are shipped.
+                                               The Docker image copies LICENSE.txt and THIRD-PARTY-NOTICES.txt to
                                                /app/licenses/skiasharp/. The Windows build does not use these packages.
+
+Credit lines that the licences of bundled components ask for (quoted from THIRD-PARTY-NOTICES.txt)
+  FreeType (FreeType Project License, FTL):
+      Portions of this software are copyright (c) <year> The FreeType Project (www.freetype.org).  All rights reserved.
+      (<year> is the year of the bundled FreeType version; the package notice does not state that version.)
+  libjpeg-turbo (IJG licence, clause 2):
+      This software is based in part on the work of the Independent JPEG Group.
+  libjpeg-turbo (Modified BSD licence) and the other licences listed above: see the full texts in
+  /app/licenses/skiasharp/THIRD-PARTY-NOTICES.txt in the image.
 
 The original copyright notices and licence files have not been changed or removed. No separate licence has been
 added for the modifications in this fork.

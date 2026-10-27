@@ -423,7 +423,7 @@ public class ModifyTools
         }
     }
 
-    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG (a canvas with an _inlink / _outlink keeps displaying its link target: the result then carries a warning). Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. Unless format is given, the canvas keeps the pixel format it has (bgra8888 for a canvas without pixels), so export, edit and import does not change the format; 4444, 565, 1555 and DXT formats are lossy.")]
+    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG (a canvas with an _inlink / _outlink keeps displaying its link target: the result then carries a warning). Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MiB are refused. Unless format is given, the canvas keeps the pixel format it has (bgra8888 for a canvas without pixels), so export, edit and import does not change the format; 4444, 565, 1555 and DXT formats are lossy.")]
     public string SetCanvasBitmap(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -530,7 +530,7 @@ public class ModifyTools
         }
     }
 
-    [McpServerTool(Name = "import_png"), Description("Import a PNG as a new canvas property. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. The pixel format is lossless bgra8888 unless format is given; 4444, 565, 1555 and DXT formats are lossy.")]
+    [McpServerTool(Name = "import_png"), Description("Import a PNG as a new canvas property. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MiB are refused. The pixel format is lossless bgra8888 unless format is given; 4444, 565, 1555 and DXT formats are lossy.")]
     public string ImportPng(
         [Description("Category name")] string category,
         [Description("Image name")] string image,

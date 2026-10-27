@@ -27,9 +27,8 @@ Status: **Phase 2** (Phase 1 had no bitmap tools). The Windows build and the Win
 Library (facts from the package metadata, not legal advice): **SkiaSharp 3.119.4** and
 **SkiaSharp.NativeAssets.Linux.NoDependencies 3.119.4**. Both packages declare `<license type="expression">MIT</license>`,
 authors "Microsoft", copyright "(c) Microsoft Corporation". The native package carries a `THIRD-PARTY-NOTICES.txt`
-that lists the native components built into `libSkiaSharp.so` (it has sections for skia, HarfBuzz and libpng, among
-others). The Docker image keeps both texts in `/app/licenses/skiasharp/`. "NoDependencies" means the native library
-needs no fontconfig or freetype, so the runtime image needs **no extra apt packages** (checked: the image is
+that has sections for the third-party components of the SkiaSharp native builds (skia, HarfBuzz, libpng, FreeType, libjpeg-turbo, libwebp, expat, zlib and others; `NOTICE` lists them all). Strings in `libSkiaSharp.so` show that FreeType, libpng 1.6.58, libjpeg-turbo 2.1.5.1 and libwebp are compiled into it. The Docker image keeps both texts in `/app/licenses/skiasharp/`. "NoDependencies" means the native library
+needs no system fontconfig or freetype packages (FreeType is compiled into libSkiaSharp), so the runtime image needs **no extra apt packages** (checked: the image is
 built from the unchanged `aspnet` base and the hardened container below decodes, scales and encodes images).
 The Windows build does not use SkiaSharp; it keeps System.Drawing. The only server code that touches an image library
 is `WzImgMCP/Imaging/CanvasImaging.cs` (`#if LINUX_BUILD`).

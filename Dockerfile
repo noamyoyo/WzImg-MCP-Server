@@ -3,7 +3,7 @@
 #
 # Images are decoded, encoded and scaled with SkiaSharp (MIT licence) and its "NoDependencies" native
 # library, which is copied from the NuGet package into the app directory: the runtime image needs no
-# extra apt packages (no libgdiplus, fontconfig, freetype).
+# extra apt packages (no libgdiplus; no system fontconfig or freetype packages, FreeType is compiled into libSkiaSharp).
 #
 # Run (read-only root, no capabilities, data mounted at /data). The image listens on localhost by
 # default, which no other container can reach, so pass --host 0.0.0.0 to listen on the container's
