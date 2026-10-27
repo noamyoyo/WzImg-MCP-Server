@@ -196,18 +196,23 @@ public class BatchTools
 
         try
         {
+            // Validate everything the caller controls before anything is created on disk.
+            var extension = NormalizeImageFormat(format);
             outputDir = PathGuard.Resolve(outputDir);
             var ds = _session.DataSource;
-            IEnumerable<string> categoryList;
+            List<string> categoryList;
 
             if (categories.Equals("all", StringComparison.OrdinalIgnoreCase))
             {
-                categoryList = ds.GetCategories();
+                categoryList = ds.GetCategories().ToList();
             }
             else
             {
-                categoryList = categories.Split(',').Select(c => c.Trim());
+                categoryList = categories.Split(',').Select(c => c.Trim()).ToList();
             }
+
+            foreach (var category in categoryList)
+                PathGuard.RequireSafeComponent(category, "category");
 
             if (!Directory.Exists(outputDir))
             {
@@ -222,11 +227,8 @@ public class BatchTools
             {
                 if (totalExported >= maxImages) break;
 
+                // Directories are created lazily, after the final file path passed the path guard.
                 var categoryDir = Path.Combine(outputDir, category);
-                if (!Directory.Exists(categoryDir))
-                {
-                    Directory.CreateDirectory(categoryDir);
-                }
 
                 foreach (var img in ds.GetImagesInCategory(category))
                 {
@@ -237,11 +239,12 @@ public class BatchTools
                         var wasParsed = img.Parsed;
                         if (!img.Parsed) img.ParseImage();
 
-                        var imageDir = Path.Combine(categoryDir, Path.GetFileNameWithoutExtension(img.Name));
-                        ExportCanvasesFromImage(img, imageDir, format, exported, failed, ref totalExported, maxImages);
+                        var imageDir = Path.Combine(categoryDir, PathGuard.SanitizeFileName(Path.GetFileNameWithoutExtension(img.Name), "image"));
+                        ExportCanvasesFromImage(img, imageDir, extension, exported, failed, ref totalExported, maxImages);
 
                         if (!wasParsed) img.UnparseImage();
                     }
+                    catch (PathNotAllowedException) { throw; }
                     catch (Exception ex)
                     {
                         failed.Add($"{category}/{img.Name}: {ex.Message}");
@@ -340,19 +343,30 @@ public class BatchTools
     {
         if (count >= max) return;
 
-        if (!Directory.Exists(outputDir))
-        {
-            Directory.CreateDirectory(outputDir);
-        }
-
+        // One name set per image: canvases whose sanitised names collide get a numeric suffix instead of overwriting each other.
+        var usedNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var prop in img.WzProperties ?? Enumerable.Empty<MapleLib.WzLib.WzImageProperty>())
         {
-            ExportCanvasesRecursive(prop, "", outputDir, format, exported, failed, ref count, max);
+            ExportCanvasesRecursive(prop, "", outputDir, format, exported, failed, ref count, max, usedNames);
+        }
+    }
+
+    /// <summary>Accepts png, jpg and jpeg (any case) and returns the file extension to use ("png" or "jpg").</summary>
+    internal static string NormalizeImageFormat(string? format)
+    {
+        switch ((format ?? "").Trim().ToLowerInvariant())
+        {
+            case "png": return "png";
+            case "jpg":
+            case "jpeg": return "jpg";
+            default:
+                throw new ArgumentException($"Unsupported format '{format}': use png, jpg or jpeg");
         }
     }
 
     private void ExportCanvasesRecursive(MapleLib.WzLib.WzImageProperty prop, string path,
-        string outputDir, string format, List<string> exported, List<string> failed, ref int count, int max)
+        string outputDir, string format, List<string> exported, List<string> failed, ref int count, int max,
+        HashSet<string> usedNames)
     {
         if (count >= max) return;
 
@@ -360,20 +374,22 @@ public class BatchTools
         {
             try
             {
-                var isJpeg = format.ToLowerInvariant() is "jpg" or "jpeg";
+                var isJpeg = format == "jpg";
                 var encoded = WzImgMCP.Imaging.CanvasImaging.EncodeCanvas(canvas,
                     isJpeg ? WzImgMCP.Imaging.ExportImageFormat.Jpeg : WzImgMCP.Imaging.ExportImageFormat.Png, out _, out _);
                 if (encoded != null)
                 {
-                    // path is the parent path here, so add the canvas name or all frames of one animation overwrite each other
-                    var fileName = (string.IsNullOrEmpty(path) ? prop.Name : $"{path}/{prop.Name}").Replace("/", "_");
-                    var filePath = Path.Combine(outputDir, $"{fileName}.{format}");
-
-                    File.WriteAllBytes(filePath, encoded);
+                    // path is the parent path here, so add the canvas name or all frames of one animation overwrite each other.
+                    // Canvas names come from the WZ file: make them one safe file name, keep them unique, and let the
+                    // path guard check the final path (symlinks resolved) before anything is created or written.
+                    var fileName = PathGuard.UniqueName(
+                        PathGuard.SanitizeFileName(string.IsNullOrEmpty(path) ? prop.Name : $"{path}/{prop.Name}", "canvas"), usedNames);
+                    var filePath = PathGuard.WriteFileGuarded(outputDir, $"{fileName}.{format}", encoded);
                     exported.Add(filePath);
                     count++;
                 }
             }
+            catch (PathNotAllowedException) { throw; }
             catch (Exception ex)
             {
                 failed.Add($"{path}: {ex.Message}");
@@ -383,7 +399,7 @@ public class BatchTools
         var childPath = string.IsNullOrEmpty(path) ? prop.Name : $"{path}/{prop.Name}";
         foreach (var child in prop.WzProperties ?? Enumerable.Empty<MapleLib.WzLib.WzImageProperty>())
         {
-            ExportCanvasesRecursive(child, childPath, outputDir, format, exported, failed, ref count, max);
+            ExportCanvasesRecursive(child, childPath, outputDir, format, exported, failed, ref count, max, usedNames);
         }
     }
 

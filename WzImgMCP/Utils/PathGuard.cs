@@ -66,6 +66,69 @@ public static class PathGuard
     /// <summary>Like <see cref="Resolve(string)"/> but passes null through.</summary>
     public static string? ResolveOptional(string? path) => path == null ? null : Resolve(path);
 
+    /// <summary>
+    /// True when <paramref name="name"/> is a single plain path component: not empty, no directory separators,
+    /// no "..", not rooted, no drive prefix or other colon, no control characters.
+    /// </summary>
+    public static bool IsSafeComponent(string? name, out string reason)
+    {
+        reason = "";
+        if (string.IsNullOrWhiteSpace(name)) { reason = "is empty"; return false; }
+        if (name.Contains('/') || name.Contains('\\')) { reason = "contains a path separator"; return false; }
+        if (name.Contains("..")) { reason = "contains '..'"; return false; }
+        if (name.Contains(':')) { reason = "contains ':' (drive prefix)"; return false; }
+        if (Path.IsPathRooted(name)) { reason = "is a rooted path"; return false; }
+        if (name.Any(char.IsControl)) { reason = "contains control characters"; return false; }
+        if (name.Trim().Trim('.').Length == 0) { reason = "is not a file name"; return false; }
+        return true;
+    }
+
+    /// <summary>Throws <see cref="PathNotAllowedException"/> when <paramref name="name"/> is not a safe single path component.</summary>
+    public static string RequireSafeComponent(string? name, string what)
+    {
+        if (!IsSafeComponent(name, out var reason))
+            throw new PathNotAllowedException($"invalid {what} '{name}': it {reason}; only a single plain name is allowed");
+        return name!;
+    }
+
+    /// <summary>
+    /// Turns arbitrary text (a canvas name, a property path) into one safe file name: separators, colons, control
+    /// characters and ".." are replaced by '_'. Never empty.
+    /// </summary>
+    public static string SanitizeFileName(string? text, string fallback = "unnamed")
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var ch in text ?? "")
+            sb.Append(ch is '/' or '\\' or ':' || char.IsControl(ch) ? '_' : ch);
+        var s = sb.ToString().Replace("..", "__").Trim();
+        if (s.Trim('.').Length == 0) return fallback;
+        return s.Length > 150 ? s.Substring(0, 150) : s;
+    }
+
+    /// <summary>Returns <paramref name="name"/>, or name_2, name_3 ... when it is already in <paramref name="used"/>; records the result.</summary>
+    public static string UniqueName(string name, ISet<string> used)
+    {
+        var candidate = name;
+        for (int i = 2; !used.Add(candidate); i++)
+            candidate = $"{name}_{i}";
+        return candidate;
+    }
+
+    /// <summary>
+    /// Writes a file under <paramref name="directory"/> after the final path was resolved through <see cref="Resolve(string)"/>
+    /// (symlinks followed, must be inside the allowed root). Directories are only created after that check.
+    /// Returns the path written.
+    /// </summary>
+    public static string WriteFileGuarded(string directory, string fileName, byte[] data)
+    {
+        var finalPath = Resolve(Path.Combine(directory, fileName));
+        var finalDir = Path.GetDirectoryName(finalPath);
+        if (!string.IsNullOrEmpty(finalDir) && !Directory.Exists(finalDir))
+            Directory.CreateDirectory(finalDir);
+        File.WriteAllBytes(finalPath, data);
+        return finalPath;
+    }
+
     private static bool IsInside(string root, string candidate)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;

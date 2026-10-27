@@ -256,7 +256,7 @@ public class ExportTools
             var exported = new List<ExportedItem>();
             var failed = new List<FailedItem>();
 
-            ExportCanvasesRecursive(target, "", outputDir, exported, failed, 0, maxDepth);
+            ExportCanvasesRecursive(target, "", outputDir, exported, failed, 0, maxDepth, new HashSet<string>(StringComparer.Ordinal));
 
             return new BatchExportResult
             {
@@ -315,7 +315,7 @@ public class ExportTools
             var exported = new List<ExportedItem>();
             var failed = new List<FailedItem>();
 
-            ExportSoundsRecursive(target, "", outputDir, exported, failed, 0, maxDepth);
+            ExportSoundsRecursive(target, "", outputDir, exported, failed, 0, maxDepth, new HashSet<string>(StringComparer.Ordinal));
 
             return new BatchExportResult
             {
@@ -334,7 +334,7 @@ public class ExportTools
     }
 
     private void ExportCanvasesRecursive(WzObject obj, string path, string outputDir,
-        List<ExportedItem> exported, List<FailedItem> failed, int depth, int maxDepth)
+        List<ExportedItem> exported, List<FailedItem> failed, int depth, int maxDepth, HashSet<string> used)
     {
         if (depth > maxDepth) return;
 
@@ -353,11 +353,8 @@ public class ExportTools
                     var pngBytes = WzImgMCP.Imaging.CanvasImaging.EncodeCanvas(canvas, WzImgMCP.Imaging.ExportImageFormat.Png, out _, out _);
                     if (pngBytes != null)
                     {
-                        var fileName = path.Replace("/", "_").Replace("\\", "_");
-                        if (string.IsNullOrEmpty(fileName)) fileName = "root";
-                        var filePath = Path.Combine(outputDir, $"{fileName}.png");
-
-                        File.WriteAllBytes(filePath, pngBytes);
+                        var fileName = PathGuard.UniqueName(PathGuard.SanitizeFileName(path, "root"), used);
+                        var filePath = PathGuard.WriteFileGuarded(outputDir, $"{fileName}.png", pngBytes);
                         exported.Add(new ExportedItem
                         {
                             SourcePath = path,
@@ -366,6 +363,7 @@ public class ExportTools
                         });
                     }
                 }
+                catch (PathNotAllowedException) { throw; }
                 catch (Exception ex)
                 {
                     failed.Add(new FailedItem { Path = path, Error = ex.Message });
@@ -380,13 +378,13 @@ public class ExportTools
             foreach (var child in children)
             {
                 var childPath = string.IsNullOrEmpty(path) ? child.Name : $"{path}/{child.Name}";
-                ExportCanvasesRecursive(child, childPath, outputDir, exported, failed, depth + 1, maxDepth);
+                ExportCanvasesRecursive(child, childPath, outputDir, exported, failed, depth + 1, maxDepth, used);
             }
         }
     }
 
     private void ExportSoundsRecursive(WzObject obj, string path, string outputDir,
-        List<ExportedItem> exported, List<FailedItem> failed, int depth, int maxDepth)
+        List<ExportedItem> exported, List<FailedItem> failed, int depth, int maxDepth, HashSet<string> used)
     {
         if (depth > maxDepth) return;
 
@@ -405,11 +403,8 @@ public class ExportTools
                     var data = sound.GetBytes(false);
                     if (data != null && data.Length > 0)
                     {
-                        var fileName = path.Replace("/", "_").Replace("\\", "_");
-                        if (string.IsNullOrEmpty(fileName)) fileName = "root";
-                        var filePath = Path.Combine(outputDir, $"{fileName}.mp3");
-
-                        File.WriteAllBytes(filePath, data);
+                        var fileName = PathGuard.UniqueName(PathGuard.SanitizeFileName(path, "root"), used);
+                        var filePath = PathGuard.WriteFileGuarded(outputDir, $"{fileName}.mp3", data);
                         exported.Add(new ExportedItem
                         {
                             SourcePath = path,
@@ -418,6 +413,7 @@ public class ExportTools
                         });
                     }
                 }
+                catch (PathNotAllowedException) { throw; }
                 catch (Exception ex)
                 {
                     failed.Add(new FailedItem { Path = path, Error = ex.Message });
@@ -432,7 +428,7 @@ public class ExportTools
             foreach (var child in children)
             {
                 var childPath = string.IsNullOrEmpty(path) ? child.Name : $"{path}/{child.Name}";
-                ExportSoundsRecursive(child, childPath, outputDir, exported, failed, depth + 1, maxDepth);
+                ExportSoundsRecursive(child, childPath, outputDir, exported, failed, depth + 1, maxDepth, used);
             }
         }
     }
