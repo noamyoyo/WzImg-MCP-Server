@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Hosting;
 using ModelContextProtocol.Server;
 using WzImgMCP.Server;
 using WzImgMCP.Tools;
+using WzImgMCP.Utils;
 
 namespace WzImgMCP;
 
@@ -62,6 +63,8 @@ class Program
 
     private static async Task RunHttpServer(string[] args, string host, int port)
     {
+        host = HostUrl.ForUrl(host);   // an IPv6 address such as :: must be in brackets inside a URL
+
         var builder = WebApplication.CreateBuilder(args);
 
         // Configure logging
