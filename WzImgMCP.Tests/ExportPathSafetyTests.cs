@@ -61,6 +61,8 @@ public sealed class ExportPathSafetyTests : IClassFixture<TestFixture>, IDisposa
             Assert.StartsWith(_root + Path.DirectorySeparatorChar, file);
     }
 
+    private const string SymlinkSkipReason = "symbolic links cannot be created here (platform or account does not allow them)";
+
     private static bool TrySymlink(string link, string target)
     {
         try { Directory.CreateSymbolicLink(link, target); return true; }
@@ -127,11 +129,11 @@ public sealed class ExportPathSafetyTests : IClassFixture<TestFixture>, IDisposa
         Assert.False(Directory.Exists(Path.Combine(_sandbox, "x")));
     }
 
-    [Fact]
+    [SkippableFact]
     public void BatchExportImages_RefusesASymlinkInsideTheRootThatLeadsOutside()
     {
         var dir = Directory.CreateDirectory(Path.Combine(_root, "out")).FullName;
-        if (!TrySymlink(Path.Combine(dir, Cat), _outside)) return;   // symlinks not permitted here
+        Skip.IfNot(TrySymlink(Path.Combine(dir, Cat), _outside), SymlinkSkipReason);
 
         var r = _batch.BatchExportImages(Cat, dir);
         MarkdownTestHelper.AssertFailure(r);
@@ -139,11 +141,11 @@ public sealed class ExportPathSafetyTests : IClassFixture<TestFixture>, IDisposa
         Assert.Empty(Directory.GetFileSystemEntries(_outside, "*", SearchOption.AllDirectories));
     }
 
-    [Fact]
+    [SkippableFact]
     public void BatchExportImages_RefusesASymlinkedImageDirectory()
     {
         var categoryDir = Directory.CreateDirectory(Path.Combine(_root, "out", Cat)).FullName;
-        if (!TrySymlink(Path.Combine(categoryDir, "Test"), _outside)) return;
+        Skip.IfNot(TrySymlink(Path.Combine(categoryDir, "Test"), _outside), SymlinkSkipReason);
 
         MarkdownTestHelper.AssertFailure(_batch.BatchExportImages(Cat, Path.Combine(_root, "out")));
         Assert.Empty(Directory.GetFileSystemEntries(_outside, "*", SearchOption.AllDirectories));
@@ -189,26 +191,33 @@ public sealed class ExportPathSafetyTests : IClassFixture<TestFixture>, IDisposa
     }
 
     [Fact]
-    public void ExportAllImages_RefusesAnOutputDirectorySymlinkedOutside_AndAnOutputDirectoryOutsideTheRoot()
+    public void ExportAllImages_RefusesAnOutputDirectoryOutsideTheRoot()
     {
         MarkdownTestHelper.AssertFailure(_export.ExportAllImages(Cat, Img, Path.Combine(_outside, "x")));
         MarkdownTestHelper.AssertFailure(_export.ExportAllImages(Cat, Img, Path.Combine(_root, "..", "outside", "y")));
-
-        var link = Path.Combine(_root, "link");
-        if (TrySymlink(link, _outside))
-            MarkdownTestHelper.AssertFailure(_export.ExportAllImages(Cat, Img, link));
         Assert.Empty(Directory.GetFileSystemEntries(_outside, "*", SearchOption.AllDirectories));
     }
 
-    [Fact]
+    [SkippableFact]
+    public void ExportAllImages_RefusesAnOutputDirectorySymlinkedOutside()
+    {
+        var link = Path.Combine(_root, "link");
+        Skip.IfNot(TrySymlink(link, _outside), SymlinkSkipReason);
+        MarkdownTestHelper.AssertFailure(_export.ExportAllImages(Cat, Img, link));
+        Assert.Empty(Directory.GetFileSystemEntries(_outside, "*", SearchOption.AllDirectories));
+    }
+
+    [SkippableFact]
     public void ExportAllImages_RefusesAFileSymlinkedOutside()
     {
         // The output file itself is a symlink to a file outside the root: writing through it must be refused.
         var dir = Directory.CreateDirectory(Path.Combine(_root, "linkfile")).FullName;
         var victim = Path.Combine(_outside, "victim.png");
         File.WriteAllText(victim, "keep");
+        var fileLinkCreated = true;
         try { File.CreateSymbolicLink(Path.Combine(dir, "testCanvas.png"), victim); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) { return; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) { fileLinkCreated = false; }
+        Skip.IfNot(fileLinkCreated, SymlinkSkipReason);
 
         MarkdownTestHelper.AssertFailure(_export.ExportAllImages(Cat, Img, dir));
         Assert.Equal("keep", File.ReadAllText(victim));

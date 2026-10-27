@@ -105,7 +105,7 @@ public sealed class PackPathSafetyTests : IDisposable
         AssertNothingOutsideRoot();
     }
 
-    [Fact]
+    [SkippableFact]
     public void PackToWz_RefusesASymlinkedOutputDirectory()
     {
         var link = Path.Combine(_root, "link");
@@ -114,7 +114,7 @@ public sealed class PackPathSafetyTests : IDisposable
         AssertNothingOutsideRoot();
     }
 
-    [Fact]
+    [SkippableFact]
     public void PackToWz_RefusesASymlinkedWzFileInTheOutputDirectory()
     {
         var outDir = Directory.CreateDirectory(Path.Combine(_root, "out")).FullName;
@@ -127,7 +127,7 @@ public sealed class PackPathSafetyTests : IDisposable
         Assert.Equal(new[] { "victim.wz" }, Directory.GetFileSystemEntries(_outside).Select(Path.GetFileName).ToArray());
     }
 
-    [Fact]
+    [SkippableFact]
     public void PackToWz_RefusesASymlinkedDataDirectory_In64BitMode()
     {
         var outDir = Directory.CreateDirectory(Path.Combine(_root, "out64")).FullName;
@@ -137,7 +137,7 @@ public sealed class PackPathSafetyTests : IDisposable
         AssertNothingOutsideRoot();
     }
 
-    [Fact]
+    [SkippableFact]
     public void PackToWz_RefusesASymlinkedCategoryDirectoryBelowData_In64BitMode()
     {
         var data = Directory.CreateDirectory(Path.Combine(_root, "out64b", "Data")).FullName;

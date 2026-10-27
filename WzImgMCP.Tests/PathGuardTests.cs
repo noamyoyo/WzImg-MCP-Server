@@ -88,43 +88,40 @@ public sealed class PathGuardTests : IDisposable
         Assert.Throws<PathNotAllowedException>(() => PathGuard.Resolve(Path.Combine(_outside, "x")));
     }
 
-    [Fact]
+    [SkippableFact]
     public void SymlinkInsideRootPointingOutside_IsRejected()
     {
         var link = Path.Combine(_root, "escape");
+        var linkCreated = true;
         try { Directory.CreateSymbolicLink(link, _outside); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            return; // symlinks not permitted on this platform/account
-        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) { linkCreated = false; }
+        Skip.IfNot(linkCreated, "symbolic links cannot be created here (platform or account does not allow them)");
 
         Assert.Throws<PathNotAllowedException>(() => PathGuard.Resolve(link));
         Assert.Throws<PathNotAllowedException>(() => PathGuard.Resolve(Path.Combine(link, "new-dir", "file.wz")));
     }
 
-    [Fact]
+    [SkippableFact]
     public void SymlinkInsideRootPointingInside_IsAllowed()
     {
         var target = Directory.CreateDirectory(Path.Combine(_root, "real")).FullName;
         var link = Path.Combine(_root, "alias");
+        var linkCreated = true;
         try { Directory.CreateSymbolicLink(link, target); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            return;
-        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) { linkCreated = false; }
+        Skip.IfNot(linkCreated, "symbolic links cannot be created here (platform or account does not allow them)");
 
         Assert.Equal(target, PathGuard.Resolve(link));
     }
 
-    [Fact]
+    [SkippableFact]
     public void RootGivenAsSymlink_IsResolved()
     {
         var link = Path.Combine(_tmp, "rootlink");
+        var linkCreated = true;
         try { Directory.CreateSymbolicLink(link, _root); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            return;
-        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) { linkCreated = false; }
+        Skip.IfNot(linkCreated, "symbolic links cannot be created here (platform or account does not allow them)");
 
         Environment.SetEnvironmentVariable(PathGuard.EnvVar, link);
         Assert.Equal(Path.Combine(_root, "a"), PathGuard.Resolve(Path.Combine(link, "a")));
