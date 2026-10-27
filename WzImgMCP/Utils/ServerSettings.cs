@@ -14,6 +14,17 @@ public static class ServerSettings
     /// </summary>
     public static bool PreBigBang => ParseFlag(Environment.GetEnvironmentVariable(PreBigBangEnvVar), true);
 
+    public const string MaxResponseBytesEnvVar = "WZIMG_MAX_RESPONSE_BYTES";
+    public const long DefaultMaxResponseBytes = 8L * 1024 * 1024;
+
+    /// <summary>
+    /// Upper limit for the image data in one tool response: the base64 text of one canvas (get_canvas_bitmap,
+    /// resolve_canvas_link), the total base64 text of get_animation_frames, and (as base64 text) the PNG of view_canvas.
+    /// Default 8 MiB; WZIMG_MAX_RESPONSE_BYTES overrides it (a positive whole number of bytes).
+    /// </summary>
+    public static long MaxResponseBytes
+        => long.TryParse(Environment.GetEnvironmentVariable(MaxResponseBytesEnvVar), out var v) && v > 0 ? v : DefaultMaxResponseBytes;
+
     /// <summary>Copies the settings into the library. Called once at startup.</summary>
     public static void Apply()
     {

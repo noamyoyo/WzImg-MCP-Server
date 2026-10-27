@@ -200,6 +200,35 @@ public static class WzDataConverter
     }
 
     /// <summary>
+    /// Gets canvas PNG as base64, unless the base64 text would be longer than <paramref name="maxChars"/>. When it is too
+    /// long, null is returned and <paramref name="tooLargeNote"/> says so (the PNG was still encoded to measure it).
+    /// Null without a note means the canvas has no decodable image.
+    /// </summary>
+    public static string? GetCanvasBase64Capped(WzCanvasProperty canvas, long maxChars, out string? tooLargeNote)
+    {
+        tooLargeNote = null;
+        byte[]? png;
+        try
+        {
+            png = WzImgMCP.Imaging.CanvasImaging.EncodeCanvas(canvas, WzImgMCP.Imaging.ExportImageFormat.Png, out _, out _);
+        }
+        catch
+        {
+            return null;
+        }
+        if (png == null)
+            return null;
+        long chars = 4L * ((png.Length + 2) / 3);
+        if (chars > maxChars)
+        {
+            tooLargeNote = $"Image data omitted: the base64 PNG would be {chars:N0} characters, above the limit of {maxChars:N0} " +
+                           "(WZIMG_MAX_RESPONSE_BYTES). Truncated: use view_canvas (scaled to fit) or export_png to get the image.";
+            return null;
+        }
+        return Convert.ToBase64String(png);
+    }
+
+    /// <summary>
     /// Gets canvas origin point
     /// </summary>
     public static VectorValue? GetCanvasOrigin(WzCanvasProperty canvas)

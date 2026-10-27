@@ -18,7 +18,7 @@ public class ImageTools : ToolBase
 {
     public ImageTools(WzSessionManager session) : base(session) { }
 
-    [McpServerTool(Name = "get_canvas_bitmap"), Description("Get canvas image as PNG (base64 encoded text, full size). To look at an image use view_canvas instead.")]
+    [McpServerTool(Name = "get_canvas_bitmap"), Description("Get canvas image as PNG (base64 encoded text, full size, omitted with a note when the base64 text would exceed the response limit, 8 MiB by default). To look at an image use view_canvas instead.")]
     public string GetCanvasBitmap(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -27,14 +27,16 @@ public class ImageTools : ToolBase
         return Execute(() =>
         {
             var prop = GetRequiredProperty<WzCanvasProperty>(category, image, path, "Canvas");
-            var base64 = WzDataConverter.GetCanvasBase64(prop)
-                ?? throw new InvalidOperationException("Failed to extract bitmap");
+            var base64 = WzDataConverter.GetCanvasBase64Capped(prop, ServerSettings.MaxResponseBytes, out var tooLarge);
+            if (base64 == null && tooLarge == null)
+                throw new InvalidOperationException("Failed to extract bitmap");
 
             return new CanvasBitmapData
             {
                 Width = prop.PngProperty?.Width ?? 0,
                 Height = prop.PngProperty?.Height ?? 0,
-                Base64Png = base64
+                Base64Png = base64,
+                ImageNote = tooLarge
             };
         });
     }
@@ -119,12 +121,25 @@ public class ImageTools : ToolBase
 
             // Second pass: get requested page of frames
             var frames = new List<FrameData>();
+            long budget = ServerSettings.MaxResponseBytes;   // total base64 characters for all frames of this call
+            bool omitted = false;
             for (int i = offset; i < totalFrames && frames.Count < limit; i++)
             {
                 if (prop[i.ToString()] is not WzCanvasProperty frameProp) break;
 
                 var origin = WzDataConverter.GetCanvasOrigin(frameProp);
                 var delay = WzDataConverter.GetCanvasDelay(frameProp);
+
+                string? frameBase64 = null;
+                string? frameNote = null;
+                if (!metadataOnly)
+                {
+                    frameBase64 = WzDataConverter.GetCanvasBase64Capped(frameProp, budget, out frameNote);
+                    if (frameBase64 != null)
+                        budget -= frameBase64.Length;
+                    else if (frameNote != null)
+                        omitted = true;
+                }
 
                 frames.Add(new FrameData
                 {
@@ -133,7 +148,8 @@ public class ImageTools : ToolBase
                     Height = frameProp.PngProperty?.Height ?? 0,
                     Origin = origin,
                     Delay = delay,
-                    Base64Png = metadataOnly ? null : WzDataConverter.GetCanvasBase64(frameProp)
+                    Base64Png = frameBase64,
+                    ImageNote = frameNote
                 });
             }
 
@@ -144,6 +160,9 @@ public class ImageTools : ToolBase
                 Offset = offset,
                 Limit = limit,
                 HasMore = offset + frames.Count < totalFrames,
+                Note = omitted
+                    ? $"Truncated: the image data of some frames was omitted because the response would exceed {ServerSettings.MaxResponseBytes:N0} base64 characters in total (WZIMG_MAX_RESPONSE_BYTES). Use view_canvas or export_png for single frames, or a smaller limit."
+                    : null,
                 Frames = frames
             };
         });
@@ -229,7 +248,7 @@ public class ImageTools : ToolBase
 
                 if (targetProp != null)
                 {
-                    var targetBase64 = WzDataConverter.GetCanvasBase64(targetProp);
+                    var targetBase64 = WzDataConverter.GetCanvasBase64Capped(targetProp, ServerSettings.MaxResponseBytes, out var targetTooLarge);
                     return new ResolveCanvasData
                     {
                         LinkType = "inlink",
@@ -237,7 +256,7 @@ public class ImageTools : ToolBase
                         Width = targetProp.PngProperty?.Width ?? 0,
                         Height = targetProp.PngProperty?.Height ?? 0,
                         Base64Png = targetBase64,
-                        ImageNote = targetBase64 == null ? ImageNoteUndecodable : null
+                        ImageNote = targetBase64 == null ? targetTooLarge ?? ImageNoteUndecodable : null
                     };
                 }
                 throw new InvalidOperationException($"Inlink target not found: {targetPath}");
@@ -250,21 +269,21 @@ public class ImageTools : ToolBase
             }
 
             // No link - return the canvas itself
-            var ownBase64 = WzDataConverter.GetCanvasBase64(prop);
+            var ownBase64 = WzDataConverter.GetCanvasBase64Capped(prop, ServerSettings.MaxResponseBytes, out var ownTooLarge);
             return new ResolveCanvasData
             {
                 LinkType = "none",
                 Width = prop.PngProperty?.Width ?? 0,
                 Height = prop.PngProperty?.Height ?? 0,
                 Base64Png = ownBase64,
-                ImageNote = ownBase64 == null ? ImageNoteUndecodable : null
+                ImageNote = ownBase64 == null ? ownTooLarge ?? ImageNoteUndecodable : null
             };
         });
     }
 
     private const string ImageNoteUndecodable = "The image data of this canvas could not be decoded.";
 
-    [McpServerTool(Name = "view_canvas"), Description("View a canvas image: returns it as an image content block (PNG) that the client can display, plus a text line with the size, WZ pixel format and origin. If the larger side is above maxSize (default and maximum 2048) the image is scaled down to fit and the text says so. _inlink / _outlink are followed.")]
+    [McpServerTool(Name = "view_canvas"), Description("View a canvas image: returns it as an image content block (PNG) that the client can display, plus a text line with the size, WZ pixel format and origin. If the larger side is above maxSize (default and maximum 2048), or the PNG would exceed the response size limit (WZIMG_MAX_RESPONSE_BYTES, 8 MiB of base64 by default), the image is scaled down to fit and the text says so. _inlink / _outlink are followed.")]
     public CallToolResponse ViewCanvas(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -282,11 +301,30 @@ public class ImageTools : ToolBase
             if (png == null)
                 return TextResponse($"Error: Canvas has no image data: {path}", isError: true);
 
+            // The PNG goes out as base64 text: keep that within the response limit by scaling down further (noisy images
+            // compress badly), and refuse when even a very small version does not fit.
+            long maxPngBytes = ServerSettings.MaxResponseBytes / 4 * 3;
+            bool scaledForSize = false;
+            int effectiveMax = Math.Clamp(maxSize, 1, CanvasImaging.MaxViewDimension);
+            effectiveMax = Math.Min(effectiveMax, Math.Max(width, height));
+            while (png.Length > maxPngBytes)
+            {
+                if (effectiveMax <= 16)
+                    return TextResponse($"Error: The image of {path} ({originalWidth}x{originalHeight} px) does not fit the response size limit of " +
+                                        $"{ServerSettings.MaxResponseBytes:N0} bytes even when scaled down to {width}x{height} px. Use export_png to write it to a file.", isError: true);
+                effectiveMax = Math.Max(16, effectiveMax * 7 / 10);
+                png = CanvasImaging.EncodeCanvasForView(prop, effectiveMax, out originalWidth, out originalHeight,
+                    out width, out height, out scaled)!;
+                scaledForSize = true;
+            }
+
             var origin = WzDataConverter.GetCanvasOrigin(prop);
             var text = $"{category}/{image}/{path}: {originalWidth}x{originalHeight} px, format {prop.PngProperty?.Format}";
             if (origin != null)
                 text += $", origin ({origin.X}, {origin.Y})";
-            if (scaled)
+            if (scaledForSize)
+                text += $". Scaled down to {width}x{height} px to fit the response size limit of {ServerSettings.MaxResponseBytes:N0} bytes (original size is {originalWidth}x{originalHeight}); use export_png for the full image";
+            else if (scaled)
                 text += $". Scaled down to {width}x{height} px to fit the maximum of {Math.Clamp(maxSize, 1, CanvasImaging.MaxViewDimension)} px (original size is {originalWidth}x{originalHeight})";
             text += ".";
 
@@ -353,6 +391,7 @@ public class CanvasBitmapData
     public int Width { get; init; }
     public int Height { get; init; }
     public string? Base64Png { get; init; }
+    public string? ImageNote { get; init; }
 }
 
 public class CanvasInfoData
@@ -378,6 +417,7 @@ public class AnimationData
     public int Offset { get; init; }
     public int Limit { get; init; }
     public bool HasMore { get; init; }
+    public string? Note { get; init; }
     public required List<FrameData> Frames { get; init; }
 }
 
@@ -389,6 +429,7 @@ public class FrameData
     public VectorValue? Origin { get; init; }
     public int Delay { get; init; }
     public string? Base64Png { get; init; }
+    public string? ImageNote { get; init; }
 }
 
 public class CanvasListData
