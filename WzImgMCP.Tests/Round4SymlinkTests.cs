@@ -218,6 +218,18 @@ public sealed class Round4SymlinkTests : IDisposable
         }
     }
 
+    [SkippableFact]
+    public void ListJson_IsNotWrittenThroughADanglingListLink()
+    {
+        var outDir = Directory.CreateDirectory(Path.Combine(_sandbox, "extracted")).FullName;
+        var gone = Path.Combine(_sandbox, "nothing-here");
+        Skip.IfNot(TryDirLink(Path.Combine(outDir, "List"), gone), "symbolic links cannot be created here");
+
+        Assert.Throws<IOException>(() => WriteListJson(outDir));
+        Assert.False(Directory.Exists(gone));
+        Assert.False(File.Exists(gone));
+    }
+
     [Fact]
     public void ListJson_IsWrittenInAPlainTree()
     {
