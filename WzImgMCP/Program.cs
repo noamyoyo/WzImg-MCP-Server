@@ -16,10 +16,11 @@ class Program
         // Parse transport mode from arguments
         var transport = ParseTransportMode(args);
         var port = ParsePort(args);
+        var host = ParseHost(args);
 
         if (transport == TransportMode.Http)
         {
-            await RunHttpServer(args, port);
+            await RunHttpServer(args, host, port);
         }
         else
         {
@@ -59,7 +60,7 @@ class Program
         await host.RunAsync();
     }
 
-    private static async Task RunHttpServer(string[] args, int port)
+    private static async Task RunHttpServer(string[] args, string host, int port)
     {
         var builder = WebApplication.CreateBuilder(args);
 
@@ -69,7 +70,7 @@ class Program
         builder.Logging.SetMinimumLevel(LogLevel.Information);
 
         // Configure URLs
-        builder.WebHost.UseUrls($"http://localhost:{port}");
+        builder.WebHost.UseUrls($"http://{host}:{port}");
 
         // Register services
         builder.Services.AddSingleton<WzSessionManager>();
@@ -91,10 +92,10 @@ class Program
 
         // Log startup info
         var logger = app.Services.GetRequiredService<ILogger<Program>>();
-        logger.LogInformation("HaRepacker MCP Server starting on http://localhost:{Port}", port);
-        logger.LogInformation("Streamable HTTP endpoint: POST http://localhost:{Port}/", port);
-        logger.LogInformation("Legacy SSE endpoint: GET http://localhost:{Port}/sse", port);
-        logger.LogInformation("Legacy message endpoint: POST http://localhost:{Port}/message", port);
+        logger.LogInformation("HaRepacker MCP Server starting on http://{Host}:{Port}", host, port);
+        logger.LogInformation("Streamable HTTP endpoint: POST http://{Host}:{Port}/", host, port);
+        logger.LogInformation("Legacy SSE endpoint: GET http://{Host}:{Port}/sse", host, port);
+        logger.LogInformation("Legacy message endpoint: POST http://{Host}:{Port}/message", host, port);
 
         // Map MCP endpoints (supports both Streamable HTTP and legacy SSE)
         app.MapMcp();
@@ -142,6 +143,25 @@ class Program
 
         // Default to stdio for backwards compatibility
         return TransportMode.Stdio;
+    }
+
+    /// <summary>
+    /// Address the HTTP transport binds to. Defaults to localhost; set --host 0.0.0.0 (or the
+    /// WZIMG_HOST environment variable) to listen on all interfaces, e.g. inside a container.
+    /// </summary>
+    private static string ParseHost(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i].Equals("--host", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                return args[i + 1];
+
+            if (args[i].StartsWith("--host=", StringComparison.OrdinalIgnoreCase))
+                return args[i].Substring("--host=".Length);
+        }
+
+        var fromEnv = Environment.GetEnvironmentVariable("WZIMG_HOST");
+        return string.IsNullOrWhiteSpace(fromEnv) ? "localhost" : fromEnv;
     }
 
     private static int ParsePort(string[] args)
