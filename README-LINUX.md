@@ -43,7 +43,7 @@ Tools:
 | `export_all_images`, `batch_export_images` | PNG files (`batch_export_images` also writes JPEG with `format=jpg`: quality 90, 4:2:0, transparent areas blended on black). |
 | `get_canvas_bitmap`, `get_animation_frames` (`metadataOnly=false`), `resolve_canvas_link` | Base64 PNG in the text result, as on Windows. Use `view_canvas` to look at an image. |
 | `validate_image` | Decodes every canvas to check it. |
-| `import_png`, `set_canvas_bitmap` | Take the PNG as `base64Png` **or** `pngPath` (a file inside the allowed root); exactly one of the two. New optional `format`: `auto` (default), `bgra8888`, `bgra4444`, `bgra5551`, `bgr565`, `dxt3`, `dxt5`. |
+| `import_png`, `set_canvas_bitmap` | Take the PNG as `base64Png` **or** `pngPath` (a file inside the allowed root); exactly one of the two. New optional `format`: `bgra8888` (exact), `bgra4444`, `bgra5551`, `bgr565`, `dxt3`, `dxt5`, or `auto`, which means `bgra8888`. Without `format`, `import_png` stores `bgra8888` and `set_canvas_bitmap` keeps the format the canvas already has (`bgra8888` when it has no pixels), so export, edit, import does not change the format. |
 
 Limits on imported PNGs (all platforms; they are checked before anything is decoded): at most **4096 x 4096 pixels**
 and **20 MiB (20,971,520 bytes)** of PNG data, read from the PNG header; the base64 text length is checked before it
@@ -58,8 +58,8 @@ WZ pixel formats (decode and encode are MapleLib's existing code, run on raw buf
 | --- | --- | --- | --- |
 | 1 | BGRA4444 | nibble x 17 | keeps the high nibble of every channel (lossy) |
 | 2 | BGRA8888 | unchanged | exact, including colour under transparent pixels |
-| 257 | ARGB1555 | channel c -> (c << 3) or (c >> 2); alpha bit -> 0 or 255 | 5 bit channels, alpha = top bit of alpha (lossy) |
-| 513 | RGB565 | as above, 6 bit green (g << 2) or (g >> 4), alpha 255 | 5/6 bit channels, alpha dropped (lossy) |
+| 257 | ARGB1555 | channel c -> (c << 3) or (c >> 2); alpha bit -> 0 or 255 | 5 bit channels rounded to the nearest value, alpha = top bit of alpha (lossy) |
+| 513 | RGB565 | as above, 6 bit green (g << 2) or (g >> 4), alpha 255 | 5/6 bit channels rounded to the nearest value, alpha dropped (lossy) |
 | 517 | one RGB565 value per 16x16 block | block colour filled in | only used when it loses nothing (see below) |
 | 3, 1026 | DXT3 | 4x4 blocks, 4 bit alpha | min/max colour box, 4 bit alpha (lossy) |
 | 2050 | DXT5 | 4x4 blocks, interpolated alpha | min/max colour box, interpolated alpha (lossy) |
@@ -76,12 +76,15 @@ it was **not** compared against real GDI+ output (no GDI+ here).
 
 What to know about the formats:
 
-- `import_png` / `set_canvas_bitmap` with `format=auto` let MapleLib choose the WZ format from the image content
-  (as the Windows tools do). That can be a lossy format (4444, 565, 1555, DXT). Use `format=bgra8888` to keep every
-  channel exact.
-- MapleLib's 5/6 bit quantiser truncates (about `v * 31 / 255` rounded down) while the decoder expands by bit
-  replication, so decoding a 565 or 1555 canvas and encoding it again can darken a channel by one step each time.
-  This is upstream behaviour and was left as it is (a test pins it).
+- `format=auto` (and no `format` for `import_png`) stores lossless `bgra8888`. MapleLib's own content based choice (4444,
+  565, 1555, DXT) is never used by these two tools; ask for a lossy format explicitly if you want a smaller canvas.
+  `set_canvas_bitmap` without `format` keeps the canvas's current format (a DXT canvas that would get an image whose size
+  is not a multiple of four falls back to `bgra8888` and the result carries a `warning`).
+- No drift: the 5 and 6 bit quantiser rounds to the nearest value (`round(v * 31 / 255)`, `round(v * 63 / 255)`), which
+  inverts the decoders' bit replication. Decoding a 565, 1555 or 4444 canvas and encoding it again returns the same
+  values (tested for all 65,536 16 bit values of each format), so export, edit, import cycles do not darken the image.
+  Upstream MapleLib rounded down, which turned a 5 bit value of 1 into 8 and then back into 0. This also changes
+  encoding on Windows and the RGB565 endpoints of DXT blocks.
 - Upstream picked Format 517 (one pixel per 16x16 block) for every RGB565 image whose size is a multiple of 16, which
   destroys any image that is not flat per block. The fork now uses 517 only when each block is a single colour
   after quantisation, otherwise Format 513. This also changes the Windows build (see below).
@@ -208,6 +211,12 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
 16. **Server: `batch_export_images` file names.** The file name of a canvas inside an image used the path of its
     parent, so all frames of an animation (`walk/0`, `walk/1`, ...) were written to the same `walk.png` and overwrote
     each other. The canvas name is now part of the file name (`walk_0.png`, `walk_1.png`).
+17. **MapleLib: 5/6 bit quantiser** (`PngUtility.QuantizeTo5` / `QuantizeTo6`) rounds to the nearest value instead of down
+    (see "Images"). This changes the bytes written for 565 and 1555 canvases and the colour endpoints of DXT blocks on
+    Windows too.
+18. **Server: `import_png` / `set_canvas_bitmap` `format=auto`** stores `bgra8888` instead of letting MapleLib choose a
+    lossy format, on Windows too (the Windows branch no longer uses the `PNG` setter). `set_canvas_bitmap` without
+    `format` keeps the canvas's current format.
 
 ## What was not verified
 

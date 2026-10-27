@@ -676,5 +676,78 @@ public sealed class CanvasImagingTests : IClassFixture<TestFixture>, IDisposable
         Assert.Equal((32, 32), CanvasImaging.ReadAndCheckPngHeader(Convert.FromBase64String(b64)));
     }
 
+    [Theory]
+    [InlineData("bgra8888", WzPngFormat.Format2, true)]
+    [InlineData("bgra4444", WzPngFormat.Format1, true)]
+    [InlineData("bgra5551", WzPngFormat.Format257, true)]
+    [InlineData("bgr565", WzPngFormat.Format513, true)]
+    [InlineData("dxt3", WzPngFormat.Format1026, false)]
+    [InlineData("dxt5", WzPngFormat.Format2050, false)]
+    public void SetCanvasBitmap_KeepsTheCanvasFormat_SoExportEditImportDoesNotDrift(string fmt, WzPngFormat expected, bool exactCycle)
+    {
+        var name = "keep_" + fmt;
+        var src = Noise(32, 16, 77 + fmt.Length);
+        MarkdownTestHelper.AssertSuccess(_modify.ImportPng(Cat, Img, "", name, Base64(PngOf(src, 32, 16)), null, null, null, fmt));
+        var canvas = (WzCanvasProperty)_fixture.Session.GetImage(Cat, Img).GetFromPath(name)!;
+        Assert.Equal(expected, canvas.PngProperty.Format);
+        var first = PixelsOf(name, out _, out _);
+
+        for (int cycle = 0; cycle < 3; cycle++)
+        {
+            var png = CanvasImaging.EncodeCanvas(canvas, ExportImageFormat.Png, out _, out _)!;
+            var result = _modify.SetCanvasBitmap(Cat, Img, name, Base64(png)); // no format: keep the current one
+            MarkdownTestHelper.AssertSuccess(result);
+            Assert.Equal(expected, canvas.PngProperty.Format);
+            Assert.Contains($"({expected})", result);
+            if (exactCycle)
+                Assert.Equal(first, PixelsOf(name, out _, out _)); // nothing drifts, however often the cycle runs
+        }
+    }
+
+    [Fact]
+    public void SetCanvasBitmap_FormatParameter_OverridesTheCurrentFormat_AndAutoMeansBgra8888()
+    {
+        var src = Noise(8, 8, 5);
+        MarkdownTestHelper.AssertSuccess(_modify.ImportPng(Cat, Img, "", "override565", Base64(PngOf(src, 8, 8)), null, null, null, "bgr565"));
+        var canvas = (WzCanvasProperty)_fixture.Session.GetImage(Cat, Img).GetFromPath("override565")!;
+        Assert.Equal(WzPngFormat.Format513, canvas.PngProperty.Format);
+
+        MarkdownTestHelper.AssertSuccess(_modify.SetCanvasBitmap(Cat, Img, "override565", Base64(PngOf(src, 8, 8)), null, "bgra4444"));
+        Assert.Equal(WzPngFormat.Format1, canvas.PngProperty.Format);
+
+        MarkdownTestHelper.AssertSuccess(_modify.SetCanvasBitmap(Cat, Img, "override565", Base64(PngOf(src, 8, 8)), null, "auto"));
+        Assert.Equal(WzPngFormat.Format2, canvas.PngProperty.Format);
+        Assert.Equal(src, PixelsOf("override565", out _, out _));
+    }
+
+    [Fact]
+    public void SetCanvasBitmap_OnACanvasWithoutPixels_UsesBgra8888()
+    {
+        var image = _fixture.Session.GetImage(Cat, Img);
+        image.AddProperty(new WzCanvasProperty("noPixelProperty"));
+        image.AddProperty(new WzCanvasProperty("emptyPixelProperty") { PngProperty = new WzPngProperty() });
+        var src = Noise(5, 7, 6);
+        foreach (var name in new[] { "noPixelProperty", "emptyPixelProperty" })
+        {
+            MarkdownTestHelper.AssertSuccess(_modify.SetCanvasBitmap(Cat, Img, name, Base64(PngOf(src, 5, 7))));
+            var canvas = (WzCanvasProperty)image.GetFromPath(name)!;
+            Assert.Equal(WzPngFormat.Format2, canvas.PngProperty.Format);
+            Assert.Equal(src, PixelsOf(name, out _, out _));
+        }
+    }
+
+    [Fact]
+    public void SetCanvasBitmap_OnADxtCanvas_FallsBackToBgra8888WithAWarning_WhenTheSizeIsNotAMultipleOfFour()
+    {
+        MarkdownTestHelper.AssertSuccess(_modify.ImportPng(Cat, Img, "", "dxtKeep", Base64(PngOf(Noise(8, 8, 1), 8, 8)), null, null, null, "dxt5"));
+        var odd = Noise(5, 3, 2);
+        var result = _modify.SetCanvasBitmap(Cat, Img, "dxtKeep", Base64(PngOf(odd, 5, 3)));
+        MarkdownTestHelper.AssertSuccess(result);
+        Assert.Contains("multiples of 4", MarkdownTestHelper.GetFirstValue(result, "warning"));
+        var canvas = (WzCanvasProperty)_fixture.Session.GetImage(Cat, Img).GetFromPath("dxtKeep")!;
+        Assert.Equal(WzPngFormat.Format2, canvas.PngProperty.Format);
+        Assert.Equal(odd, PixelsOf("dxtKeep", out _, out _));
+    }
+
     #endregion
 }

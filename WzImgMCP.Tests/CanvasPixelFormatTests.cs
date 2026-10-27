@@ -54,12 +54,8 @@ public class CanvasPixelFormatTests
     private static byte Expand5(int c) => (byte)((c << 3) | (c >> 2));
     private static byte Expand6(int c) => (byte)((c << 2) | (c >> 4));
 
-    /// <summary>MapleLib's 8 bit to 5/6 bit quantiser: (v * max + 1) scaled by 257/65536, which truncates v * max / 255.</summary>
-    private static int Quantize(int value, int max)
-    {
-        int scaled = value * max + 1;
-        return (scaled + (scaled >> 8)) >> 8;
-    }
+    /// <summary>The 8 bit to 5/6 bit quantiser MapleLib is defined to use: round(v * max / 255), to the nearest value.</summary>
+    private static int Quantize(int value, int max) => (int)Math.Round(value * max / 255.0, MidpointRounding.AwayFromZero);
 
     private static byte[] Pattern(int width, int height, Func<int, int, (byte b, byte g, byte r, byte a)> pixel)
     {
@@ -561,18 +557,79 @@ public class CanvasPixelFormatTests
     }
 
     [Theory]
+    [InlineData(SurfaceFormat.Bgra32)]
+    [InlineData(SurfaceFormat.Bgra4444)]
     [InlineData(SurfaceFormat.Bgr565)]
     [InlineData(SurfaceFormat.Bgra5551)]
-    public void Encode_ThenDecode_Again_CanOnlyDarkenByOneStep_For565And1555(SurfaceFormat format)
+    public void Encode_ThenDecode_Again_HasNoDrift_ForEveryFormatWithoutCompression(SurfaceFormat format)
     {
-        // MapleLib's 5/6 bit quantiser truncates and the decoder expands with bit replication, so decoding and
-        // re-encoding a 565 / 1555 canvas can lower a channel by one 5/6-bit step each time. This pins that
-        // (upstream) behaviour so a change is noticed; it never raises a channel and never drops more than one step.
+        // The 5/6 bit quantiser rounds to nearest, which inverts the decoder's bit replication, so decoding a canvas
+        // and encoding the result again returns the same pixels: an export / edit / import cycle cannot drift.
         var src = Noise(16, 16, 31, opaque: true);
         var first = Decoded(Encode(src, 16, 16, format), 16, 16);
         var second = Decoded(Encode(first, 16, 16, format), 16, 16);
-        for (int i = 0; i < first.Length; i++)
-            Assert.InRange(first[i] - second[i], 0, 8);
+        Assert.Equal(first, second);
+        var third = Decoded(Encode(second, 16, 16, format), 16, 16);
+        Assert.Equal(first, third);
+    }
+
+    [Theory]
+    [InlineData(WzPngFormat.Format513, SurfaceFormat.Bgr565)]
+    [InlineData(WzPngFormat.Format257, SurfaceFormat.Bgra5551)]
+    [InlineData(WzPngFormat.Format1, SurfaceFormat.Bgra4444)]
+    public void DecodeThenEncode_ReturnsTheSameValue_ForEvery16BitValue(WzPngFormat wz, SurfaceFormat surface)
+    {
+        // A 256x256 image whose pixels are all 65536 possible 16 bit values (so every 4, 5 and 6 bit channel value and
+        // both alpha bits occur in every channel). Decode, encode and decode again must give identical pixels.
+        const int size = 256;
+        var raw = new byte[size * size * 2];
+        for (int v = 0; v < 65536; v++)
+        {
+            raw[v * 2] = (byte)v;
+            raw[v * 2 + 1] = (byte)(v >> 8);
+        }
+        var decoded = Decode(wz, size, size, raw);
+        var again = Decoded(Encode(decoded, size, size, surface), size, size);
+        Assert.Equal(decoded, again);
+
+        // The same with a width that is not a multiple of four, so the scalar tail of the encoder runs as well.
+        const int w = 253, h = 259;
+        var part = raw.AsSpan(0, w * h * 2).ToArray();
+        var decodedPart = Decode(wz, w, h, part);
+        Assert.Equal(decodedPart, Decoded(Encode(decodedPart, w, h, surface), w, h));
+    }
+
+    [Theory]
+    [InlineData(256, 1)]   // every pixel goes through the vector path of the encoder
+    [InlineData(1, 256)]   // every pixel goes through the scalar path
+    public void Quantiser_RoundsToNearest_ForEveryChannelValue(int width, int height)
+    {
+        // Pixel i has the value i in all three colour channels (and alpha 255).
+        var src = Pattern(width, height, (x, y) => { byte v = (byte)(x + y); return (v, v, v, 255); });
+        foreach (var (format, greenMax) in new[] { (SurfaceFormat.Bgr565, 63), (SurfaceFormat.Bgra5551, 31) })
+        {
+            var px = Decoded(Encode(src, width, height, format), width, height);
+            for (int i = 0; i < 256; i++)
+            {
+                Assert.Equal(Expand5(Quantize(i, 31)), px[i * 4]);
+                Assert.Equal(greenMax == 63 ? Expand6(Quantize(i, 63)) : Expand5(Quantize(i, 31)), px[i * 4 + 1]);
+                Assert.Equal(Expand5(Quantize(i, 31)), px[i * 4 + 2]);
+            }
+        }
+    }
+
+    [Fact]
+    public void Quantiser_PreviouslyDriftingValues_NowStay()
+    {
+        // 5 bit value 1 expands to 8 and used to encode back to 0; 5 expands to 41 and used to encode back to 4.
+        foreach (int five in new[] { 1, 5 })
+        {
+            byte expanded = Expand5(five);
+            var src = Pattern(4, 1, (x, y) => (expanded, expanded, expanded, 255));
+            var px = Decoded(Encode(src, 4, 1, SurfaceFormat.Bgr565), 4, 1);
+            Assert.Equal(expanded, px[0]);
+            Assert.Equal(expanded, px[2]);
+        }
     }
 
     #endregion

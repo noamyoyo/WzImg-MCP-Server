@@ -132,6 +132,53 @@ public static class CanvasImaging
         }
     }
 
+    /// <summary>
+    /// The surface format that re-encodes a canvas pixel property in the format it already has, or null when it has
+    /// no pixels. BC7 (which MapleLib can decode but not encode) and unknown formats map to lossless BGRA8888.
+    /// </summary>
+    public static SurfaceFormat? SurfaceFormatOf(WzPngProperty? png)
+    {
+        if (png == null || png.Width <= 0 || png.Height <= 0)
+            return null;
+        return png.Format switch
+        {
+            WzPngFormat.Format1 => SurfaceFormat.Bgra4444,
+            WzPngFormat.Format2 => SurfaceFormat.Bgra32,
+            WzPngFormat.Format3 => SurfaceFormat.Dxt3,
+            WzPngFormat.Format1026 => SurfaceFormat.Dxt3,
+            WzPngFormat.Format257 => SurfaceFormat.Bgra5551,
+            WzPngFormat.Format513 => SurfaceFormat.Bgr565,
+            WzPngFormat.Format517 => SurfaceFormat.Bgr565,
+            WzPngFormat.Format2050 => SurfaceFormat.Dxt5,
+            _ => SurfaceFormat.Bgra32
+        };
+    }
+
+    /// <summary>
+    /// The format a PNG is stored in when it replaces the image of an existing canvas. An explicit
+    /// <paramref name="format"/> wins ("auto" means lossless BGRA8888). Without one the canvas keeps the format it has,
+    /// so export, edit and import does not change the format (and the 16 bit formats do not drift); a canvas without
+    /// pixels gets BGRA8888. A DXT canvas cannot keep its format for an image whose size is not a multiple of four:
+    /// that falls back to BGRA8888 and <paramref name="note"/> says so.
+    /// </summary>
+    public static SurfaceFormat ResolveReplacementFormat(string? format, WzPngProperty? current, int width, int height, out string? note)
+    {
+        note = null;
+        if (!string.IsNullOrWhiteSpace(format))
+            return ParseFormat(format) ?? SurfaceFormat.Bgra32;
+
+        SurfaceFormat? kept = SurfaceFormatOf(current);
+        if (kept == null)
+            return SurfaceFormat.Bgra32;
+        if ((kept == SurfaceFormat.Dxt3 || kept == SurfaceFormat.Dxt5) && (width % 4 != 0 || height % 4 != 0))
+        {
+            note = $"The canvas was stored as {current!.Format} (DXT), which needs a width and height that are multiples of 4; " +
+                   $"the {width}x{height} image was stored as bgra8888 instead. Pass format to choose another format.";
+            return SurfaceFormat.Bgra32;
+        }
+        return kept.Value;
+    }
+
     #endregion
 
     #region Canvas -> image file bytes
@@ -242,12 +289,16 @@ public static class CanvasImaging
 
     /// <summary>
     /// Decodes a PNG and stores it in the canvas pixel property. Refuses non-PNG data and images larger than the
-    /// import limits before decoding. <paramref name="format"/> forces a WZ pixel format (see <see cref="ParseFormat"/>).
+    /// import limits before decoding. <paramref name="format"/> names the WZ pixel format (see <see cref="ParseFormat"/>);
+    /// null, empty and "auto" store lossless BGRA8888.
     /// </summary>
     public static void SetCanvasFromPng(WzPngProperty target, byte[] png, string? format, out int width, out int height)
+        => SetCanvasFromPng(target, png, ParseFormat(format) ?? SurfaceFormat.Bgra32, out width, out height);
+
+    /// <summary>Decodes a PNG and stores it in the canvas pixel property in the given WZ pixel format.</summary>
+    public static void SetCanvasFromPng(WzPngProperty target, byte[] png, SurfaceFormat force, out int width, out int height)
     {
         (int declaredWidth, int declaredHeight) = ReadAndCheckPngHeader(png);
-        SurfaceFormat? force = ParseFormat(format);
 #if LINUX_BUILD
         byte[] bgra = SkiaDecodePng(png, declaredWidth, declaredHeight, out width, out height);
         target.SetPixelsBgra32(bgra, width, height, force);
@@ -258,11 +309,6 @@ public static class CanvasImaging
         height = bitmap.Height;
         if (width > MaxImportDimension || height > MaxImportDimension)
             throw new ImageRejectedException($"PNG is too large: {width}x{height} pixels, the limit is {MaxImportDimension}x{MaxImportDimension}.");
-        if (force == null)
-        {
-            target.PNG = bitmap; // unchanged Windows behaviour
-            return;
-        }
 
         var data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
         try

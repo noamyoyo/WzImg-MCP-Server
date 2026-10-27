@@ -423,14 +423,14 @@ public class ModifyTools
         }
     }
 
-    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. The WZ pixel format is chosen automatically from the image content unless format is given; 4444, 565, 1555 and DXT formats are lossy.")]
+    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. Unless format is given, the canvas keeps the pixel format it has (bgra8888 for a canvas without pixels), so export, edit and import does not change the format; 4444, 565, 1555 and DXT formats are lossy.")]
     public string SetCanvasBitmap(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
         [Description("Property path to the canvas")] string path,
         [Description("Base64 encoded PNG data (give this or pngPath)")] string? base64Png = null,
         [Description("Path of a PNG file inside the allowed root (give this or base64Png)")] string? pngPath = null,
-        [Description("Optional WZ pixel format: auto (default), bgra8888 (exact), bgra4444, bgra5551, bgr565, dxt3, dxt5")] string? format = null)
+        [Description("Optional WZ pixel format: bgra8888 (exact), bgra4444, bgra5551, bgr565, dxt3, dxt5, or auto (= bgra8888). Default: the canvas keeps its current format")] string? format = null)
     {
         if (!_session.IsInitialized)
         {
@@ -450,8 +450,10 @@ public class ModifyTools
             var pngData = WzImgMCP.Imaging.CanvasImaging.ReadPngInput(base64Png, pngPath);
 
             var oldSize = $"{prop.PngProperty?.Width}x{prop.PngProperty?.Height}";
+            (int declaredWidth, int declaredHeight) = WzImgMCP.Imaging.CanvasImaging.ReadAndCheckPngHeader(pngData);
+            var surface = WzImgMCP.Imaging.CanvasImaging.ResolveReplacementFormat(format, prop.PngProperty, declaredWidth, declaredHeight, out var note);
             prop.PngProperty ??= new WzPngProperty();
-            WzImgMCP.Imaging.CanvasImaging.SetCanvasFromPng(prop.PngProperty, pngData, format, out var newWidth, out var newHeight);
+            WzImgMCP.Imaging.CanvasImaging.SetCanvasFromPng(prop.PngProperty, pngData, surface, out var newWidth, out var newHeight);
 
             img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
@@ -459,7 +461,8 @@ public class ModifyTools
                 Success = true,
                 Path = path,
                 OldValue = oldSize,
-                NewValue = $"{newWidth}x{newHeight} ({prop.PngProperty.Format})"
+                NewValue = $"{newWidth}x{newHeight} ({prop.PngProperty.Format})",
+                Warning = note
             };
         }
         catch (Exception ex)
@@ -525,7 +528,7 @@ public class ModifyTools
         }
     }
 
-    [McpServerTool(Name = "import_png"), Description("Import a PNG as a new canvas property. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. The WZ pixel format is chosen automatically from the image content unless format is given; 4444, 565, 1555 and DXT formats are lossy.")]
+    [McpServerTool(Name = "import_png"), Description("Import a PNG as a new canvas property. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. The pixel format is lossless bgra8888 unless format is given; 4444, 565, 1555 and DXT formats are lossy.")]
     public string ImportPng(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -535,7 +538,7 @@ public class ModifyTools
         [Description("Origin X (optional)")] int? originX = null,
         [Description("Origin Y (optional)")] int? originY = null,
         [Description("Path of a PNG file inside the allowed root (give this or base64Png)")] string? pngPath = null,
-        [Description("Optional WZ pixel format: auto (default), bgra8888 (exact), bgra4444, bgra5551, bgr565, dxt3, dxt5")] string? format = null)
+        [Description("Optional WZ pixel format: bgra8888 (exact, default), bgra4444, bgra5551, bgr565, dxt3, dxt5, or auto (= bgra8888)")] string? format = null)
     {
         if (!_session.IsInitialized)
         {
@@ -775,6 +778,7 @@ public class ModifyResult : MarkdownResultBase
     public string? Path { get; set; }
     public string? OldValue { get; set; }
     public string? NewValue { get; set; }
+    public string? Warning { get; set; }
 }
 
 public class AddPropertyResult : MarkdownResultBase
