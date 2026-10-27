@@ -1,4 +1,5 @@
 # WzImg MCP Server Documentation
+> **Linux fork:** this copy has a Linux build and a container image. Read [README-LINUX.md](README-LINUX.md) first for how to build and run it, what is different from upstream, and the security notes. See also [NOTICE](NOTICE).
 
 **Version**: 1.1.0
 

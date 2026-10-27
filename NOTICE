@@ -1,0 +1,25 @@
+WzImg MCP Server, Linux fork
+
+This repository is a modified copy of third-party software. It is not the upstream project and has not been
+reviewed or endorsed by the upstream authors.
+
+Upstream projects and the points this fork was taken from
+  WzImg-MCP-Server  https://github.com/lastbattle/WzImg-MCP-Server   commit 96cfd6e
+  MapleLib          https://github.com/lastbattle/MapleLib            commit 22e32d13
+  (the MapleLib fork is https://github.com/noamyoyo/MapleLib, branch linux-slim)
+
+Licences, as found in the files of this repository (this is a statement of what the files say, not legal advice)
+  LICENSE                                      MIT License, Copyright (c) 2026 lastbattle
+  MapleLib/LICENSE                             GNU General Public License, version 3 (full text)
+                                               The MapleLib README.md describes the project as "MIT License - See LICENSE
+                                               file for details", which does not match that file.
+  MapleLib/spine-runtimes-2.1.25/LICENSE       Spine Runtimes Software License, Version 2.2
+                                               (Copyright (c) 2013, Esoteric Software)
+  Other bundled or referenced components keep their own licences; check their files and NuGet package metadata.
+
+The original copyright notices and licence files have not been changed or removed. No separate licence has been
+added for the modifications in this fork.
+
+Modifications
+  The changes made in this fork are listed in README-LINUX.md and are visible in the git history
+  (git log 96cfd6e..HEAD in this repository, git log 22e32d13..HEAD in MapleLib).
