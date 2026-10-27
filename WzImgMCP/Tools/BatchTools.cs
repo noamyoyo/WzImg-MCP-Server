@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+﻿﻿using System.ComponentModel;
 using ModelContextProtocol.Server;
 using WzImgMCP.Core;
 using WzImgMCP.Server;
@@ -196,7 +196,6 @@ public class BatchTools
 
         try
         {
-            PlatformSupport.RequireBitmaps("batch_export_images");
             outputDir = PathGuard.Resolve(outputDir);
             var ds = _session.DataSource;
             IEnumerable<string> categoryList;
@@ -361,17 +360,16 @@ public class BatchTools
         {
             try
             {
-                var bitmap = canvas.GetLinkedWzCanvasBitmap();
-                if (bitmap != null)
+                var isJpeg = format.ToLowerInvariant() is "jpg" or "jpeg";
+                var encoded = WzImgMCP.Imaging.CanvasImaging.EncodeCanvas(canvas,
+                    isJpeg ? WzImgMCP.Imaging.ExportImageFormat.Jpeg : WzImgMCP.Imaging.ExportImageFormat.Png, out _, out _);
+                if (encoded != null)
                 {
-                    var fileName = string.IsNullOrEmpty(path) ? prop.Name : path.Replace("/", "_");
+                    // path is the parent path here, so add the canvas name or all frames of one animation overwrite each other
+                    var fileName = (string.IsNullOrEmpty(path) ? prop.Name : $"{path}/{prop.Name}").Replace("/", "_");
                     var filePath = Path.Combine(outputDir, $"{fileName}.{format}");
 
-                    var imageFormat = format.ToLowerInvariant() == "jpg"
-                        ? System.Drawing.Imaging.ImageFormat.Jpeg
-                        : System.Drawing.Imaging.ImageFormat.Png;
-
-                    bitmap.Save(filePath, imageFormat);
+                    File.WriteAllBytes(filePath, encoded);
                     exported.Add(filePath);
                     count++;
                 }

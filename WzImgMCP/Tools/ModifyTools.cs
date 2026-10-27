@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+﻿﻿using System.ComponentModel;
 using ModelContextProtocol.Server;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -423,12 +423,14 @@ public class ModifyTools
         }
     }
 
-    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG")]
+    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. The WZ pixel format is chosen automatically from the image content unless format is given; 4444, 565, 1555 and DXT formats are lossy.")]
     public string SetCanvasBitmap(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
         [Description("Property path to the canvas")] string path,
-        [Description("Base64 encoded PNG data")] string base64Png)
+        [Description("Base64 encoded PNG data (give this or pngPath)")] string? base64Png = null,
+        [Description("Path of a PNG file inside the allowed root (give this or base64Png)")] string? pngPath = null,
+        [Description("Optional WZ pixel format: auto (default), bgra8888 (exact), bgra4444, bgra5551, bgr565, dxt3, dxt5")] string? format = null)
     {
         if (!_session.IsInitialized)
         {
@@ -437,7 +439,6 @@ public class ModifyTools
 
         try
         {
-            PlatformSupport.RequireBitmaps("set_canvas_bitmap");
             var img = _session.GetImage(category, image);
             var prop = img.GetFromPath(path) as WzCanvasProperty;
 
@@ -446,12 +447,11 @@ public class ModifyTools
                 return new ModifyResult { Success = false, Error = $"Canvas property not found: {path}" };
             }
 
-            var pngData = Convert.FromBase64String(base64Png);
-            using var ms = new MemoryStream(pngData);
-            using var bitmap = new Bitmap(ms);
+            var pngData = WzImgMCP.Imaging.CanvasImaging.ReadPngInput(base64Png, pngPath);
 
             var oldSize = $"{prop.PngProperty?.Width}x{prop.PngProperty?.Height}";
-            prop.PngProperty.PNG = bitmap;
+            prop.PngProperty ??= new WzPngProperty();
+            WzImgMCP.Imaging.CanvasImaging.SetCanvasFromPng(prop.PngProperty, pngData, format, out var newWidth, out var newHeight);
 
             img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
@@ -459,7 +459,7 @@ public class ModifyTools
                 Success = true,
                 Path = path,
                 OldValue = oldSize,
-                NewValue = $"{bitmap.Width}x{bitmap.Height}"
+                NewValue = $"{newWidth}x{newHeight} ({prop.PngProperty.Format})"
             };
         }
         catch (Exception ex)
@@ -525,15 +525,17 @@ public class ModifyTools
         }
     }
 
-    [McpServerTool(Name = "import_png"), Description("Import a PNG as a new canvas property")]
+    [McpServerTool(Name = "import_png"), Description("Import a PNG as a new canvas property. Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MB are refused. The WZ pixel format is chosen automatically from the image content unless format is given; 4444, 565, 1555 and DXT formats are lossy.")]
     public string ImportPng(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
         [Description("Parent property path")] string parentPath,
         [Description("Name for the new canvas")] string name,
-        [Description("Base64 encoded PNG data")] string base64Png,
+        [Description("Base64 encoded PNG data (give this or pngPath)")] string? base64Png = null,
         [Description("Origin X (optional)")] int? originX = null,
-        [Description("Origin Y (optional)")] int? originY = null)
+        [Description("Origin Y (optional)")] int? originY = null,
+        [Description("Path of a PNG file inside the allowed root (give this or base64Png)")] string? pngPath = null,
+        [Description("Optional WZ pixel format: auto (default), bgra8888 (exact), bgra4444, bgra5551, bgr565, dxt3, dxt5")] string? format = null)
     {
         if (!_session.IsInitialized)
         {
@@ -542,7 +544,6 @@ public class ModifyTools
 
         try
         {
-            PlatformSupport.RequireBitmaps("import_png");
             var img = _session.GetImage(category, image);
 
             IPropertyContainer parent;
@@ -561,13 +562,11 @@ public class ModifyTools
                     ?? throw new InvalidOperationException($"Parent is not a property container");
             }
 
-            var pngData = Convert.FromBase64String(base64Png);
-            using var ms = new MemoryStream(pngData);
-            using var bitmap = new Bitmap(ms);
+            var pngData = WzImgMCP.Imaging.CanvasImaging.ReadPngInput(base64Png, pngPath);
 
             var canvas = new WzCanvasProperty(name);
             canvas.PngProperty = new WzPngProperty();
-            canvas.PngProperty.PNG = bitmap;
+            WzImgMCP.Imaging.CanvasImaging.SetCanvasFromPng(canvas.PngProperty, pngData, format, out var importedWidth, out var importedHeight);
 
             if (originX.HasValue && originY.HasValue)
             {
@@ -585,8 +584,8 @@ public class ModifyTools
                 Success = true,
                 Path = string.IsNullOrEmpty(parentPath) ? name : $"{parentPath}/{name}",
                 Type = "Canvas",
-                Width = bitmap.Width,
-                Height = bitmap.Height
+                Width = importedWidth,
+                Height = importedHeight
             };
         }
         catch (Exception ex)

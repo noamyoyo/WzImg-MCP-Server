@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+﻿﻿using System.ComponentModel;
 using ModelContextProtocol.Server;
 using WzImgMCP.Core;
 using WzImgMCP.Server;
@@ -295,7 +295,6 @@ public class AnalysisTools
 
         try
         {
-            PlatformSupport.RequireBitmaps("validate_image");
             var img = _session.GetImage(category, image);
             var issues = new List<ValidationIssue>();
             var stats = new ValidationStats();
@@ -556,8 +555,7 @@ public class AnalysisTools
                     stats.CanvasCount++;
                     try
                     {
-                        var bitmap = canvas.GetLinkedWzCanvasBitmap();
-                        if (bitmap == null)
+                        if (!WzImgMCP.Imaging.CanvasImaging.HasDecodableImage(canvas))
                         {
                             issues.Add(new ValidationIssue
                             {

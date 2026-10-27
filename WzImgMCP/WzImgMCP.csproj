@@ -22,6 +22,13 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
   </ItemGroup>
 
+  <!-- Linux build only: PNG/JPEG decode, encode and scaling (the Windows build keeps System.Drawing).
+       SkiaSharp is MIT licensed; the NoDependencies native asset needs no fontconfig/freetype. -->
+  <ItemGroup Condition="'$(LinuxBuild)' == 'true'">
+    <PackageReference Include="SkiaSharp" Version="3.119.4" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.4" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\MapleLib\MapleLib\MapleLib.csproj" />
   </ItemGroup>

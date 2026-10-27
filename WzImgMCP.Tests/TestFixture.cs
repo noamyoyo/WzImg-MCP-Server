@@ -1,5 +1,7 @@
+#if !LINUX_BUILD
 using System.Drawing;
 using System.Drawing.Imaging;
+#endif
 using WzImgMCP.Server;
 using MapleLib.WzLib;
 using MapleLib.WzLib.Util;
@@ -91,14 +93,7 @@ public class TestFixture : IDisposable
         // Add a canvas property with a simple test image
         var canvas = new WzCanvasProperty("testCanvas");
         canvas.PngProperty = new WzPngProperty();
-        using (var bmp = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
-        {
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.Clear(Color.Red);
-            }
-            canvas.PngProperty.PNG = bmp;
-        }
+        SetSolidColor(canvas.PngProperty, 32, 32, 255, 0, 0);
 
         // Add origin to canvas
         var origin = new WzVectorProperty("origin",
@@ -117,14 +112,7 @@ public class TestFixture : IDisposable
         {
             var frame = new WzCanvasProperty(i.ToString());
             frame.PngProperty = new WzPngProperty();
-            using (var bmp = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
-            {
-                using (var g = Graphics.FromImage(bmp))
-                {
-                    g.Clear(Color.FromArgb(255, i * 80, i * 80, i * 80));
-                }
-                frame.PngProperty.PNG = bmp;
-            }
+            SetSolidColor(frame.PngProperty, 32, 32, (byte)(i * 80), (byte)(i * 80), (byte)(i * 80));
             frame.AddProperty(new WzVectorProperty("origin",
                 new WzIntProperty("X", 16),
                 new WzIntProperty("Y", 16)));
@@ -144,6 +132,29 @@ public class TestFixture : IDisposable
         {
             img.SaveImage(writer, true);
         }
+    }
+
+    /// <summary>Fills the canvas with one opaque colour. Uses GDI+ on Windows and the raw pixel API on Linux.</summary>
+    private static void SetSolidColor(WzPngProperty png, int width, int height, byte r, byte g, byte b)
+    {
+#if LINUX_BUILD
+        var pixels = new byte[width * height * 4];
+        for (int i = 0; i < pixels.Length; i += 4)
+        {
+            pixels[i] = b;
+            pixels[i + 1] = g;
+            pixels[i + 2] = r;
+            pixels[i + 3] = 255;
+        }
+        png.SetPixelsBgra32(pixels, width, height);
+#else
+        using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        using (var gfx = Graphics.FromImage(bmp))
+        {
+            gfx.Clear(Color.FromArgb(255, r, g, b));
+        }
+        png.PNG = bmp;
+#endif
     }
 
     private void CreateTestSoundImage(string directory, string fileName)

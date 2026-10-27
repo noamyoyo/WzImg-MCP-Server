@@ -190,12 +190,8 @@ public static class WzDataConverter
     {
         try
         {
-            var bitmap = canvas.GetLinkedWzCanvasBitmap();
-            if (bitmap == null) return null;
-
-            using var ms = new MemoryStream();
-            bitmap.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-            return Convert.ToBase64String(ms.ToArray());
+            var png = WzImgMCP.Imaging.CanvasImaging.EncodeCanvas(canvas, WzImgMCP.Imaging.ExportImageFormat.Png, out _, out _);
+            return png == null ? null : Convert.ToBase64String(png);
         }
         catch
         {

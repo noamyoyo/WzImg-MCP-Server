@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+﻿﻿using System.ComponentModel;
 using ModelContextProtocol.Server;
 using WzImgMCP.Core;
 using WzImgMCP.Server;
@@ -111,7 +111,7 @@ public class ExportTools
         }
     }
 
-    [McpServerTool(Name = "export_png"), Description("Export a canvas property to PNG file")]
+    [McpServerTool(Name = "export_png"), Description("Export a canvas property to a PNG file at its full size (the output path must be inside the allowed root when WZIMG_ALLOWED_ROOT is set). To look at an image use view_canvas.")]
     public string ExportPng(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -125,7 +125,6 @@ public class ExportTools
 
         try
         {
-            PlatformSupport.RequireBitmaps("export_png");
             outputPath = PathGuard.Resolve(outputPath);
             var img = _session.GetImage(category, image);
             var prop = img.GetFromPath(path) as WzCanvasProperty;
@@ -135,8 +134,8 @@ public class ExportTools
                 return new ExportPngResult { Success = false, Error = $"Canvas property not found: {path}" };
             }
 
-            var bitmap = prop.GetLinkedWzCanvasBitmap();
-            if (bitmap == null)
+            var png = WzImgMCP.Imaging.CanvasImaging.EncodeCanvas(prop, WzImgMCP.Imaging.ExportImageFormat.Png, out var pngWidth, out var pngHeight);
+            if (png == null)
             {
                 return new ExportPngResult { Success = false, Error = "Failed to extract bitmap" };
             }
@@ -147,14 +146,14 @@ public class ExportTools
                 Directory.CreateDirectory(dir);
             }
 
-            bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+            File.WriteAllBytes(outputPath, png);
 
             return new ExportPngResult
             {
                 Success = true,
                 OutputPath = outputPath,
-                Width = bitmap.Width,
-                Height = bitmap.Height,
+                Width = pngWidth,
+                Height = pngHeight,
                 Size = new FileInfo(outputPath).Length
             };
         }
@@ -231,7 +230,6 @@ public class ExportTools
 
         try
         {
-            PlatformSupport.RequireBitmaps("export_all_images");
             outputDir = PathGuard.Resolve(outputDir);
             var img = _session.GetImage(category, image);
             WzObject target;
@@ -352,14 +350,14 @@ public class ExportTools
             {
                 try
                 {
-                    var bitmap = canvas.GetLinkedWzCanvasBitmap();
-                    if (bitmap != null)
+                    var pngBytes = WzImgMCP.Imaging.CanvasImaging.EncodeCanvas(canvas, WzImgMCP.Imaging.ExportImageFormat.Png, out _, out _);
+                    if (pngBytes != null)
                     {
                         var fileName = path.Replace("/", "_").Replace("\\", "_");
                         if (string.IsNullOrEmpty(fileName)) fileName = "root";
                         var filePath = Path.Combine(outputDir, $"{fileName}.png");
 
-                        bitmap.Save(filePath, System.Drawing.Imaging.ImageFormat.Png);
+                        File.WriteAllBytes(filePath, pngBytes);
                         exported.Add(new ExportedItem
                         {
                             SourcePath = path,

@@ -1,5 +1,7 @@
-﻿using System.ComponentModel;
+﻿﻿using System.ComponentModel;
+using ModelContextProtocol.Protocol.Types;
 using ModelContextProtocol.Server;
+using WzImgMCP.Imaging;
 using WzImgMCP.Core;
 using WzImgMCP.Server;
 using WzImgMCP.Utils;
@@ -16,7 +18,7 @@ public class ImageTools : ToolBase
 {
     public ImageTools(WzSessionManager session) : base(session) { }
 
-    [McpServerTool(Name = "get_canvas_bitmap"), Description("Get canvas image as PNG (base64 encoded)")]
+    [McpServerTool(Name = "get_canvas_bitmap"), Description("Get canvas image as PNG (base64 encoded text, full size). To look at an image use view_canvas instead.")]
     public string GetCanvasBitmap(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -24,7 +26,6 @@ public class ImageTools : ToolBase
     {
         return Execute(() =>
         {
-            PlatformSupport.RequireBitmaps("get_canvas_bitmap");
             var prop = GetRequiredProperty<WzCanvasProperty>(category, image, path, "Canvas");
             var base64 = WzDataConverter.GetCanvasBase64(prop)
                 ?? throw new InvalidOperationException("Failed to extract bitmap");
@@ -99,8 +100,6 @@ public class ImageTools : ToolBase
     {
         return Execute(() =>
         {
-            if (!metadataOnly)
-                PlatformSupport.RequireBitmaps("get_animation_frames with metadataOnly=false (image data; metadata only works)");
             var img = GetImage(category, image);
             var prop = img.GetFromPath(path)
                 ?? throw new InvalidOperationException($"Property not found: {path}");
@@ -230,14 +229,15 @@ public class ImageTools : ToolBase
 
                 if (targetProp != null)
                 {
+                    var targetBase64 = WzDataConverter.GetCanvasBase64(targetProp);
                     return new ResolveCanvasData
                     {
                         LinkType = "inlink",
                         LinkPath = targetPath,
                         Width = targetProp.PngProperty?.Width ?? 0,
                         Height = targetProp.PngProperty?.Height ?? 0,
-                        Base64Png = PlatformSupport.BitmapsSupported ? WzDataConverter.GetCanvasBase64(targetProp) : null,
-                        ImageNote = PlatformSupport.BitmapsSupported ? null : PlatformSupport.BitmapUnavailableMessage("resolve_canvas_link (image data)")
+                        Base64Png = targetBase64,
+                        ImageNote = targetBase64 == null ? ImageNoteUndecodable : null
                     };
                 }
                 throw new InvalidOperationException($"Inlink target not found: {targetPath}");
@@ -250,16 +250,66 @@ public class ImageTools : ToolBase
             }
 
             // No link - return the canvas itself
+            var ownBase64 = WzDataConverter.GetCanvasBase64(prop);
             return new ResolveCanvasData
             {
                 LinkType = "none",
                 Width = prop.PngProperty?.Width ?? 0,
                 Height = prop.PngProperty?.Height ?? 0,
-                Base64Png = PlatformSupport.BitmapsSupported ? WzDataConverter.GetCanvasBase64(prop) : null,
-                ImageNote = PlatformSupport.BitmapsSupported ? null : PlatformSupport.BitmapUnavailableMessage("resolve_canvas_link (image data)")
+                Base64Png = ownBase64,
+                ImageNote = ownBase64 == null ? ImageNoteUndecodable : null
             };
         });
     }
+
+    private const string ImageNoteUndecodable = "The image data of this canvas could not be decoded.";
+
+    [McpServerTool(Name = "view_canvas"), Description("View a canvas image: returns it as an image content block (PNG) that the client can display, plus a text line with the size, WZ pixel format and origin. If the larger side is above maxSize (default and maximum 2048) the image is scaled down to fit and the text says so. _inlink / _outlink are followed.")]
+    public CallToolResponse ViewCanvas(
+        [Description("Category name")] string category,
+        [Description("Image name")] string image,
+        [Description("Property path to the canvas")] string path,
+        [Description("Largest allowed width or height in pixels, 1-2048 (default 2048). Larger images are scaled down.")] int maxSize = CanvasImaging.MaxViewDimension)
+    {
+        if (!Session.IsInitialized)
+            return TextResponse("Error: No data source initialized. Call init_data_source first.", isError: true);
+
+        try
+        {
+            var prop = GetRequiredProperty<WzCanvasProperty>(category, image, path, "Canvas");
+            var png = CanvasImaging.EncodeCanvasForView(prop, maxSize, out var originalWidth, out var originalHeight,
+                out var width, out var height, out var scaled);
+            if (png == null)
+                return TextResponse($"Error: Canvas has no image data: {path}", isError: true);
+
+            var origin = WzDataConverter.GetCanvasOrigin(prop);
+            var text = $"{category}/{image}/{path}: {originalWidth}x{originalHeight} px, format {prop.PngProperty?.Format}";
+            if (origin != null)
+                text += $", origin ({origin.X}, {origin.Y})";
+            if (scaled)
+                text += $". Scaled down to {width}x{height} px to fit the maximum of {Math.Clamp(maxSize, 1, CanvasImaging.MaxViewDimension)} px (original size is {originalWidth}x{originalHeight})";
+            text += ".";
+
+            return new CallToolResponse
+            {
+                Content = new List<Content>
+                {
+                    new Content { Type = "text", Text = text },
+                    new Content { Type = "image", Data = Convert.ToBase64String(png), MimeType = "image/png" }
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            return TextResponse("Error: " + ex.Message, isError: true);
+        }
+    }
+
+    private static CallToolResponse TextResponse(string text, bool isError) => new()
+    {
+        IsError = isError,
+        Content = new List<Content> { new Content { Type = "text", Text = text } }
+    };
 
     private void FindCanvases(WzObject obj, string path, List<CanvasEntry> results, int depth, int maxDepth)
     {
