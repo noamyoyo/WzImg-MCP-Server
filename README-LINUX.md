@@ -200,8 +200,8 @@ MapleLib (`linux-slim`):
 9. **Backups location.** With `WZIMG_ALLOWED_ROOT` set, the `Backups` directory is created inside the version
    directory (for example `/data/v83/Backups`), not next to it. Category listing and packing skip it. Without
    the variable the location is unchanged (a sibling directory).
-10. **`WzFile.SaveToDisk` temp file.** The `.TEMP` scratch file is now written next to the output file instead of
-    in the process working directory.
+10. **`WzFile.SaveToDisk` temp file.** The scratch file (a random `.<guid>.tmp` name, created with `CreateNew`) is now written next to the output file instead of
+    in the process working directory, and is read back through the stream that wrote it.
 11. **Case-insensitive category lookup** (`ImgFileSystemManager`). Category names given in any case are mapped to
     the real directory name on disk. This only changes behaviour on case-sensitive file systems.
 
@@ -267,8 +267,8 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     Fix after the third review of the packer:
 
 29. **Server and MapleLib: the packer and the extractor do not write through a symbolic link.** MapleLib's `NoFollowFile` helper writes each
-    output file (`Category.wz`, `Category_NNN.wz`, `List_000.wz`, `Canvas.ini`, `_Canvas_NNN.wz`, the extracted `.img` files and the data-source
-    saves) to a new file with a random name next to the target and renames it over the target; a symbolic link at the target (also a
+    output file (`Category.wz`, `Data.wz`, `List.wz`, `Category_NNN.wz`, `List_000.wz`, `Category.ini`, `Canvas.ini`, `_Canvas_NNN.wz`, the extracted `.img` files,
+    `List.json`, `manifest.json` and the category index) to a new file with a random name next to the target and renames it over the target; a symbolic link at the target (also a
     dangling one) is refused with an error, never followed. Before `pack_to_wz` creates anything, `PathGuard.Resolve` also checks
     `Data/<category>` and `Data/<category>/_Canvas`, and every symbolic link found inside them, so a link that leads outside the allowed
     root is refused with a message that names the path (`BatchTools.GuardPackOutputs`). This is a check of the state at that moment; the
@@ -279,8 +279,24 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     - a crash between the create and the rename can leave a `.<guid>.tmp` file in the output directory;
     - the audio size cap (`WZIMG_MAX_RESPONSE_BYTES`) applies after `GetBytes` has loaded the sound, so a very large sound is read into memory
       before it is cut off.
+    - on Windows the rename (`MoveFileEx` with replace) fails on a read-only target or one held open without delete sharing; not tested there;
+    - a link to a place **inside** the root is not refused by `GuardPackOutputs`; the packer's own write refuses it later, so files written
+      before that point (for example `Category.ini`) can remain.
     - Old behaviour that was left alone: `pack_to_wz` with `saveAs64Bit` reports a failure although it wrote the files (it counts only
       top-level `*.wz` files).
+
+    Fix after the fourth review (links in directories of the tree, not only at the written file):
+
+30. **MapleLib: `NoFollowFile.RefuseSymbolicLinksBelow`** refuses a symbolic link (or reparse point), also a dangling one, at the root or at
+    any existing directory or file on the way down to a path. `ImgFileSystemManager.SaveImageToFile` (`save_image`) uses it for the image
+    path (below the data source) and for the backup path (below the `Backups` directory), so a link planted in a category directory, in
+    `Backups` or at the image file makes the save fail and nothing is written or copied outside the tree; the temporary file is created
+    with `CreateNew`. The extractor resolves its `List` output directory like a category directory (`List.json` is no longer written through
+    a `List` link). `WzFile.SaveToDisk` reads its scratch file back through the stream that wrote it instead of reopening it by name, and
+    the temporary files are closed when a writer cannot be created. `List.json` was never written before: the extractor serialised an
+    anonymous object with the source-generated `ListWzJsonFormat` serializer and threw `InvalidCastException` (an upstream fault from the
+    System.Text.Json migration); it now builds the real `ListWzJsonFormat`. All of these are checks of the state at that moment; a link
+    swapped in between the check and the write is the residual described in item 29.
 
 Path audit of the tools: the only tool code that joins a user supplied string into a path with `Path.Combine` is in `BatchTools`
 (`batch_export_images` category: checked as a plain name; image directory and canvas file names: sanitised, unique, and written through
@@ -296,9 +312,9 @@ combined path against the version directory (lexically, symbolic links inside th
   built without `LINUX_BUILD` against System.Drawing.Common), never run; the Windows build of the whole solution could
   not be built here. The changes to MapleLib's encoders keep the same `LockBits` call on Windows but were not run
   there.
-- Tests on Linux: 394 tests (159 before the first review fixes, 268 before the second, 357 before the third); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
-  391 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
-  and Morph.wz 389 pass and 5 skip; without the variable 368 pass and 26 skip. Tests that need symbolic links are reported as
+- Tests on Linux: 404 tests (159 before the first review fixes, 268 before the second, 357 before the third, 394 before the fourth); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
+  401 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
+  and Morph.wz 399 pass and 5 skip; without the variable 378 pass and 26 skip. Tests that need symbolic links are reported as
   skipped (not passed) where links cannot be created. All 29 upstream tests that failed in
   Phase 1 (they share `TestFixture`, which created a `System.Drawing.Bitmap`) now pass, because the fixture uses the raw
   pixel API under `LINUX_BUILD`. Two Phase 1 tests (`PlatformSupportTests`) were deleted with the stub they tested.

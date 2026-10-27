@@ -544,8 +544,9 @@ public class BatchTools
     /// Resolves the paths the packer writes below <paramref name="outputDir"/> through the path guard (symlinks followed),
     /// before anything is created: Category.wz, Category, Data, Data/Category, Data.wz and List.wz, and every symbolic link
     /// found inside Data/Category and Data/Category/_Canvas (Category.ini, Category_NNN.wz, List_000.wz, Canvas.ini,
-    /// _Canvas_NNN.wz), so a link planted there that leads outside the allowed root is refused with a clear message and
-    /// nothing is half written. This is a check of the state now; the packer's own writes (MapleLib NoFollowFile) never
+    /// _Canvas_NNN.wz), so a link planted there that leads outside the allowed root is refused with a clear message before
+    /// anything is written. A link that stays inside the root is not refused here: the packer's own write (NoFollowFile)
+    /// refuses it later, so files written before that point (for example Category.ini) can remain. This is a check of the state now; the packer's own writes (MapleLib NoFollowFile) never
     /// write through a link at the file they write, whatever happens after the check.
     /// </summary>
     internal static void GuardPackOutputs(string outputDir, IEnumerable<string> categories)
