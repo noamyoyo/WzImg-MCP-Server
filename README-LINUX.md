@@ -295,8 +295,16 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     a `List` link). `WzFile.SaveToDisk` reads its scratch file back through the stream that wrote it instead of reopening it by name, and
     the temporary files are closed when a writer cannot be created. `List.json` was never written before: the extractor serialised an
     anonymous object with the source-generated `ListWzJsonFormat` serializer and threw `InvalidCastException` (an upstream fault from the
-    System.Text.Json migration); it now builds the real `ListWzJsonFormat`. All of these are checks of the state at that moment; a link
+    System.Text.Json migration); it now builds the real `ListWzJsonFormat`. Before this fix every extraction that had `List.wz` entries
+    ended with `Success = false` after the images were written; a failing `List.json` write still fails the extraction (the error is
+    reported, the extracted images stay). Path prefix tests in `ImgFileSystemManager` and in the new helper are exact on Linux and ignore
+    case only on Windows, so `/data/V83` is not taken for `/data/v83`. All of these are checks of the state at that moment; a link
     swapped in between the check and the write is the residual described in item 29.
+
+    Effects to know: a data source directory that is itself a symbolic link, or a `Backups` directory that is a link (for example to
+    another disk), makes every `save_image` fail with the generic "not changed" error (the reason is only in the debug output). Mount the
+    real directory instead of linking to it. The backup file name is chosen before the image is serialised, so two saves of the same
+    image within the same second can collide on the backup name and the second fails (nothing is lost).
 
 Path audit of the tools: the only tool code that joins a user supplied string into a path with `Path.Combine` is in `BatchTools`
 (`batch_export_images` category: checked as a plain name; image directory and canvas file names: sanitised, unique, and written through
@@ -312,9 +320,9 @@ combined path against the version directory (lexically, symbolic links inside th
   built without `LINUX_BUILD` against System.Drawing.Common), never run; the Windows build of the whole solution could
   not be built here. The changes to MapleLib's encoders keep the same `LockBits` call on Windows but were not run
   there.
-- Tests on Linux: 404 tests (159 before the first review fixes, 268 before the second, 357 before the third, 394 before the fourth); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
-  401 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
-  and Morph.wz 399 pass and 5 skip; without the variable 378 pass and 26 skip. Tests that need symbolic links are reported as
+- Tests on Linux: 407 tests (159 before the first review fixes, 268 before the second, 357 before the third, 394 before the fourth, 404 before the fifth step); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
+  404 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
+  and Morph.wz 402 pass and 5 skip; without the variable 381 pass and 26 skip. Tests that need symbolic links are reported as
   skipped (not passed) where links cannot be created. All 29 upstream tests that failed in
   Phase 1 (they share `TestFixture`, which created a `System.Drawing.Bitmap`) now pass, because the fixture uses the raw
   pixel API under `LINUX_BUILD`. Two Phase 1 tests (`PlatformSupportTests`) were deleted with the stub they tested.

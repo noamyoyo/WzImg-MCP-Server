@@ -158,6 +158,50 @@ public sealed class Round4SymlinkTests : IDisposable
         Assert.Empty(Directory.GetFiles(Path.Combine(version, "Map"), "*.tmp"));
     }
 
+    [SkippableFact]
+    public void SaveImage_DoesNotAcceptADirectoryThatDiffersFromTheVersionDirectoryOnlyInCase()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "paths are compared ignoring case on Windows");
+        var manager = NewManager(out var version);
+        var sibling = Path.Combine(_sandbox, "V83");                 // a different directory on a case-sensitive file system
+        Skip.IfNot(TryDirLink(sibling, _outside), "symbolic links cannot be created here");
+        Directory.CreateDirectory(Path.Combine(_outside, "Map"));
+
+        Assert.Throws<IOException>(() => NoFollowFile.RefuseSymbolicLinksBelow(version, Path.Combine(sibling, "Map", "x.img")));
+        Assert.False(manager.SaveImageToFile(NewImage("x"), Path.Combine(sibling, "Map", "x.img")));
+        Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(_outside, "Map")));
+    }
+
+    [SkippableFact]
+    public void SaveImage_RefusesADanglingLinkAtACategoryDirectory()
+    {
+        var manager = NewManager(out var version);
+        Directory.Delete(Path.Combine(version, "Map"));
+        Skip.IfNot(TryDirLink(Path.Combine(version, "Map"), Path.Combine(_sandbox, "nothing-here")), "symbolic links cannot be created here");
+
+        Assert.False(manager.SaveImageToFile(NewImage("x"), Path.Combine(version, "Map", "x.img")));
+        AssertOutsideEmpty();
+    }
+
+    [SkippableFact]
+    public void SaveImage_WithAllowedRoot_RefusesALinkInsideTheBackupsDirectory()
+    {
+        var manager = NewManager(out var version);
+        Environment.SetEnvironmentVariable("WZIMG_ALLOWED_ROOT", _sandbox);      // backups are <version>/Backups now
+        var target = Path.Combine(version, "Map", "x.img");
+        Assert.True(manager.SaveImageToFile(NewImage("one"), target));
+        Assert.True(manager.SaveImageToFile(NewImage("two"), target));            // makes Backups/IMG/v83/Map
+        var inner = Path.Combine(version, "Backups", "IMG", "v83", "Map");
+        Assert.True(Directory.Exists(inner));
+        Directory.Delete(inner, true);
+        Skip.IfNot(TryDirLink(inner, _outside), "symbolic links cannot be created here");
+        var before = File.ReadAllBytes(target);
+
+        Assert.False(manager.SaveImageToFile(NewImage("three"), target));
+        AssertOutsideEmpty();
+        Assert.Equal(before, File.ReadAllBytes(target));
+    }
+
     // ---- WzExtractionService: List/List.json ----------------------------------------------------------------
 
     private static void WriteListJson(string outputVersionPath)
@@ -179,7 +223,13 @@ public sealed class Round4SymlinkTests : IDisposable
     {
         var outDir = Directory.CreateDirectory(Path.Combine(_sandbox, "extracted")).FullName;
         WriteListJson(outDir);
-        Assert.True(File.Exists(Path.Combine(outDir, "List", "List.json")));
+        var file = Path.Combine(outDir, "List", "List.json");
+        Assert.True(File.Exists(file));
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(file));
+        Assert.Equal("ListWz", doc.RootElement.GetProperty("Type").GetString());
+        Assert.Equal(1, doc.RootElement.GetProperty("OriginalCount").GetInt32());
+        Assert.Equal("a.img", doc.RootElement.GetProperty("Entries")[0].GetString());
+        Assert.Equal("a.img", doc.RootElement.GetProperty("RemainingEntries")[0].GetString());
     }
 
     [SkippableFact]
