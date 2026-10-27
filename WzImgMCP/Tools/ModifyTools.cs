@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using WzImgMCP.Core;
 using WzImgMCP.Server;
+using MapleLib.Img;
 using MapleLib.WzLib;
 using MapleLib.WzLib.WzProperties;
 using WzImgMCP.Utils;
@@ -674,7 +675,18 @@ public class ModifyTools
 
             // Get the file path from the data source
             var ds = _session.DataSource;
-            ds.SaveImage(category, img);
+            if (!ds.SaveImage(category, img))
+            {
+                return new SaveResult { Success = false, Error = $"Failed to save {category}/{image}; the file on disk was not changed" };
+            }
+
+            // The in-memory image still points at the file it was read from, whose offsets are now stale.
+            // Drop it from the cache so the next access (including after unparse_image or
+            // discard_changes) reads the file that was just written.
+            if (ds is ImgFileSystemDataSource imgSource)
+            {
+                imgSource.Manager.RemoveFromCache(category, img.Name);
+            }
 
             return new SaveResult
             {

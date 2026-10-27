@@ -111,4 +111,48 @@ public sealed class WzEditSafetyTests : IDisposable
         Assert.Equal("UNSAVED-EDIT", Name());
         Assert.Equal(originalCount, PropertyCount());
     }
+
+    [SkippableFact]
+    public void UnparseAfterSave_IsAllowed_AndReadsBackTheSavedEdit()
+    {
+        Skip.IfNot(WzTestData.Available, WzTestData.SkipReason);
+        var originalCount = PropertyCount();
+        MarkdownTestHelper.AssertSuccess(_modify.SetString(Category, Image, NamePath, "SAVED-EDIT"));
+        MarkdownTestHelper.AssertSuccess(_modify.SaveImage(Category, Image));
+
+        MarkdownTestHelper.AssertSuccess(_life.UnparseImage(Category, Image));
+
+        Assert.Equal("SAVED-EDIT", Name());
+        Assert.Equal(originalCount, PropertyCount());
+        MarkdownTestHelper.AssertSuccess(_life.UnloadCategory(Category));
+        Assert.Equal("SAVED-EDIT", Name());
+    }
+
+    [SkippableFact]
+    public void SaveImage_ReportsFailure_WhenTheFileCannotBeWritten()
+    {
+        Skip.IfNot(WzTestData.Available, WzTestData.SkipReason);
+        Skip.If(OperatingSystem.IsWindows(), "uses Unix directory permissions");
+        var dir = Path.Combine(_tree!.Path, Category);
+        var originalBytes = File.ReadAllBytes(PetFile);
+        MarkdownTestHelper.AssertSuccess(_modify.SetString(Category, Image, NamePath, "NOT-SAVED"));
+        var mode = File.GetUnixFileMode(dir);
+        try
+        {
+            File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            var probe = Path.Combine(dir, "probe.tmp");
+            try { File.WriteAllText(probe, "x"); File.Delete(probe); Skip.If(true, "directory permissions are not enforced (running as root)"); }
+            catch (UnauthorizedAccessException) { }
+
+            var result = _modify.SaveImage(Category, Image);
+
+            MarkdownTestHelper.AssertFailure(result);
+            Assert.Contains("Failed to save", result);
+        }
+        finally
+        {
+            File.SetUnixFileMode(dir, mode);
+        }
+        Assert.Equal(originalBytes, File.ReadAllBytes(PetFile));
+    }
 }
