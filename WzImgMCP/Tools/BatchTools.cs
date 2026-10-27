@@ -539,8 +539,12 @@ public class BatchTools
     }
 
     /// <summary>
-    /// Resolves every path the packer will write below <paramref name="outputDir"/> through the path guard
-    /// (symlinks followed), so a symlink planted in the output directory cannot lead the packer outside the allowed root.
+    /// Resolves the paths the packer writes below <paramref name="outputDir"/> through the path guard (symlinks followed),
+    /// before anything is created: Category.wz, Category, Data, Data/Category, Data.wz and List.wz, and every symbolic link
+    /// found inside Data/Category and Data/Category/_Canvas (Category.ini, Category_NNN.wz, List_000.wz, Canvas.ini,
+    /// _Canvas_NNN.wz), so a link planted there that leads outside the allowed root is refused with a clear message and
+    /// nothing is half written. This is a check of the state now; the packer's own writes (MapleLib NoFollowFile) never
+    /// write through a link at the file they write, whatever happens after the check.
     /// </summary>
     internal static void GuardPackOutputs(string outputDir, IEnumerable<string> categories)
     {
@@ -550,7 +554,19 @@ public class BatchTools
         {
             PathGuard.Resolve(Path.Combine(outputDir, $"{category}.wz"));
             PathGuard.Resolve(Path.Combine(outputDir, category));
-            PathGuard.Resolve(Path.Combine(outputDir, "Data", category));
+            var categoryData = Path.Combine(outputDir, "Data", category);
+            PathGuard.Resolve(categoryData);
+            foreach (var directory in new[] { categoryData, Path.Combine(categoryData, "_Canvas") })
+            {
+                var resolved = PathGuard.Resolve(directory);
+                if (!Directory.Exists(resolved))
+                    continue;
+                foreach (var entry in Directory.EnumerateFileSystemEntries(resolved))
+                {
+                    if (new FileInfo(entry).LinkTarget != null)
+                        PathGuard.Resolve(entry);
+                }
+            }
         }
     }
 
