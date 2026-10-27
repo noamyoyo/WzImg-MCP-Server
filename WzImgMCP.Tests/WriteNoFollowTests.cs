@@ -70,3 +70,36 @@ public sealed class WriteNoFollowTests : IDisposable
         Assert.Single(Directory.GetFileSystemEntries(_dir));
     }
 }
+
+/// <summary>The refusal says what happened: a symbolic link was found. It does not claim the path is outside a root that may not be set.</summary>
+[Collection("AllowedRootEnv")]
+public sealed class WriteNoFollowMessageTests : IDisposable
+{
+    private readonly string? _previousRoot = Environment.GetEnvironmentVariable(PathGuard.EnvVar);
+    private readonly string _dir = Directory.CreateTempSubdirectory("nofollow-msg-").FullName;
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable(PathGuard.EnvVar, _previousRoot);
+        try { Directory.Delete(_dir, true); } catch { }
+    }
+
+    [SkippableTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RefusalOfALinkInsideTheRoot_NamesTheLink_AndNeverSaysOutsideAllowedRoot(bool rootSet)
+    {
+        Environment.SetEnvironmentVariable(PathGuard.EnvVar, rootSet ? _dir : null);
+        var real = Path.Combine(_dir, "real.txt");
+        File.WriteAllText(real, "keep");
+        var link = Path.Combine(_dir, "link.txt");
+        try { File.CreateSymbolicLink(link, real); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) { Skip.If(true, "symbolic links cannot be created here"); }
+
+        var ex2 = Assert.Throws<PathNotAllowedException>(() => PathGuard.WriteFileNoFollow(link, new byte[] { 1 }));
+        Assert.Contains("symbolic link", ex2.Message);
+        Assert.Contains(link, ex2.Message);
+        Assert.DoesNotContain("outside allowed root", ex2.Message);
+        Assert.Equal("keep", File.ReadAllText(real));
+    }
+}

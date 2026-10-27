@@ -188,7 +188,13 @@ public static class PathGuard
     public static void WriteFileNoFollow(string resolvedPath, byte[] data)
     {
         if (new FileInfo(resolvedPath).LinkTarget != null)
-            throw new PathNotAllowedException($"path outside allowed root: refusing to write through the symbolic link {resolvedPath}");
+        {
+            // The link may point anywhere (also inside the root, or there may be no root at all): do not claim it leads outside.
+            var root = AllowedRoot;
+            throw new PathNotAllowedException(
+                $"refusing to write through the symbolic link {resolvedPath} (a link at the path of a write is never followed" +
+                (root == null ? ")" : $"; allowed root is {root})"));
+        }
 
         var temp = Path.Combine(Path.GetDirectoryName(resolvedPath) ?? ".", "." + Guid.NewGuid().ToString("N") + ".tmp");
         try
