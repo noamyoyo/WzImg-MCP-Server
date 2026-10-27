@@ -36,7 +36,11 @@ public class ExportTools
 
         try
         {
-            outputPath = PathGuard.ResolveOptional(outputPath);
+            // The file that is written is "<outputPath>.md" (the extension is changed to .md): change it first, then
+            // resolve and guard that final path, not the one the caller wrote.
+            outputPath = string.IsNullOrEmpty(outputPath)
+                ? PathGuard.ResolveOptional(outputPath)
+                : PathGuard.Resolve(EnsureMarkdownOutputPath(outputPath));
             // Clamp maxDepth
             maxDepth = Math.Clamp(maxDepth, 1, 10);
 
@@ -66,7 +70,6 @@ public class ExportTools
 
             if (!string.IsNullOrEmpty(outputPath))
             {
-                outputPath = EnsureMarkdownOutputPath(outputPath);
                 var dir = Path.GetDirectoryName(outputPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                 {
