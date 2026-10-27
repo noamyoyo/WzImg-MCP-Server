@@ -1,0 +1,12 @@
+<Project>
+  <!--
+    Linux build switch. On a non-Windows OS the whole solution (including the MapleLib
+    submodule projects) builds against plain net10.0 with MonoGame DesktopGL and without
+    WinForms/WPF/SharpDX. Force either mode with -p:LinuxBuild=true or -p:LinuxBuild=false.
+  -->
+  <PropertyGroup>
+    <LinuxBuild Condition="'$(LinuxBuild)' == '' And !$([MSBuild]::IsOSPlatform('Windows'))">true</LinuxBuild>
+    <LinuxBuild Condition="'$(LinuxBuild)' == ''">false</LinuxBuild>
+    <NoWarn Condition="'$(LinuxBuild)' == 'true'">$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+</Project>

@@ -1,10 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(LinuxBuild)' != 'true'">net10.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(LinuxBuild)' == 'true'">net10.0</TargetFramework>
+    <DefineConstants Condition="'$(LinuxBuild)' == 'true'">$(DefineConstants);LINUX_BUILD</DefineConstants>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <EnableWindowsTargeting Condition="'$(LinuxBuild)' != 'true'">true</EnableWindowsTargeting>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
     <AssemblyTitle>HaMCP</AssemblyTitle>
