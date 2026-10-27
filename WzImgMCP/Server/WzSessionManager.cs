@@ -172,12 +172,19 @@ public class WzSessionManager : IDisposable
         return img.WzProperties?.Count ?? 0;
     }
 
+    public const string UnsavedChangesMessage = "unsaved changes: call save_image or discard_changes first";
+
     /// <summary>
-    /// Unparses an image (frees memory)
+    /// Unparses an image (frees memory). Refused while the image has unsaved changes.
     /// </summary>
     public void UnparseImage(string category, string imageName)
     {
         var img = DataSource.GetImage(category, imageName);
+        if (img?.Changed == true)
+        {
+            // An unparsed image that is still flagged as changed reads back empty and would be saved empty.
+            throw new InvalidOperationException(UnsavedChangesMessage);
+        }
         if (img?.Parsed == true)
         {
             img.UnparseImage();

@@ -180,6 +180,19 @@ public class LifecycleTools
             var ds = _session.DataSource;
             int unloadedCount = 0;
 
+            // Unparsing a changed image would discard the edits (and a later save would write it empty),
+            // so refuse the whole call before touching anything.
+            var changed = ds.GetImagesInCategory(category).Where(i => i.Changed).Select(i => i.Name).ToList();
+            if (changed.Count > 0)
+            {
+                var shown = string.Join(", ", changed.Take(5)) + (changed.Count > 5 ? ", ..." : "");
+                return new UnloadResult
+                {
+                    Success = false,
+                    Error = $"{WzSessionManager.UnsavedChangesMessage} ({changed.Count} changed image(s): {shown})"
+                };
+            }
+
             foreach (var img in ds.GetImagesInCategory(category))
             {
                 if (img.Parsed)

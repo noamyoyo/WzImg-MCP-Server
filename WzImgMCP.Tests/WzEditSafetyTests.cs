@@ -74,4 +74,41 @@ public sealed class WzEditSafetyTests : IDisposable
         MarkdownTestHelper.AssertSuccess(_modify.SaveImage(Category, Image));
         Assert.Equal(originalBytes, File.ReadAllBytes(PetFile));
     }
+
+    [SkippableFact]
+    public void UnparseImage_IsRefusedWhileEdited_AndDataStaysIntact()
+    {
+        Skip.IfNot(WzTestData.Available, WzTestData.SkipReason);
+        var originalCount = PropertyCount();
+        MarkdownTestHelper.AssertSuccess(_modify.SetString(Category, Image, NamePath, "UNSAVED-EDIT"));
+
+        var refused = _life.UnparseImage(Category, Image);
+
+        MarkdownTestHelper.AssertFailure(refused);
+        Assert.Contains("unsaved changes: call save_image or discard_changes first", refused);
+        Assert.Equal("UNSAVED-EDIT", Name());
+        Assert.Equal(originalCount, PropertyCount());
+
+        // The edit is still saveable and complete.
+        MarkdownTestHelper.AssertSuccess(_modify.SaveImage(Category, Image));
+        using var fresh = new WzSessionManager();
+        fresh.InitDataSource(_tree!.Path);
+        var r = new PropertyTools(fresh).GetString(Category, Image, NamePath);
+        Assert.Equal("UNSAVED-EDIT", WzTestData.Value(r, "value"));
+    }
+
+    [SkippableFact]
+    public void UnloadCategory_IsRefusedWhileAnImageIsEdited_AndDataStaysIntact()
+    {
+        Skip.IfNot(WzTestData.Available, WzTestData.SkipReason);
+        var originalCount = PropertyCount();
+        MarkdownTestHelper.AssertSuccess(_modify.SetString(Category, Image, NamePath, "UNSAVED-EDIT"));
+
+        var refused = _life.UnloadCategory(Category);
+
+        MarkdownTestHelper.AssertFailure(refused);
+        Assert.Contains("unsaved changes", refused);
+        Assert.Equal("UNSAVED-EDIT", Name());
+        Assert.Equal(originalCount, PropertyCount());
+    }
 }
