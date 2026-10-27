@@ -219,6 +219,23 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     lossy format, on Windows too (the Windows branch no longer uses the `PNG` setter). `set_canvas_bitmap` without
     `format` keeps the canvas's current format.
 
+    Fixes after the independent review of Phase 2 (all of them also apply to a Windows build and have not been tested there):
+
+19. **Server: output paths of the bulk export tools.** `batch_export_images` accepts only `png`, `jpg` and `jpeg` as `format`
+    (any case; `jpeg` is written with the extension `.jpg`) and a `category` that is one plain name (no separator, `..`, drive
+    prefix, rooted path or control character). Canvas and image names are sanitised into one file name and made unique
+    (`name`, `name_2`, ...). Every final file path of `batch_export_images`, `export_all_images` and `export_all_sounds`
+    goes through `PathGuard.Resolve` (symlinks followed) before a directory is created or a file written, and a path outside
+    the root fails the whole call. Without `WZIMG_ALLOWED_ROOT` the format and name checks still apply.
+20. **Server: `WZIMG_PRE_BIG_BANG`** (default `1`) sets `ImageFormatDetector.UsePreBigBangImageFormats` at startup, so
+    MapleLib's automatic format choice no longer returns DXT.
+21. **Server: response size cap** (`WZIMG_MAX_RESPONSE_BYTES`, default 8 MiB): `get_canvas_bitmap`, `resolve_canvas_link`,
+    `get_animation_frames` and `view_canvas` omit or shrink image data above it. `set_canvas_bitmap` on an `_inlink` /
+    `_outlink` canvas returns a `warning`, and a refused `set_canvas_bitmap` no longer leaves an empty pixel property behind.
+22. **MapleLib: a link that leads to a canvas without pixel data** gives no image from `GetLinkedPixelsBgra32` (as
+    `GetLinkedWzCanvasBitmap` on Windows) instead of falling back to the linking canvas's own pixels, and the
+    `ListWzUsed` setter works on the Linux build.
+
 ## What was not verified
 
 - **The Windows build and the Windows test suite were not run.** All building and testing was done in the Linux
@@ -227,9 +244,9 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
   built without `LINUX_BUILD` against System.Drawing.Common), never run; the Windows build of the whole solution could
   not be built here. The changes to MapleLib's encoders keep the same `LockBits` call on Windows but were not run
   there.
-- Tests on Linux: 159 tests; with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
-  156 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
-  and Morph.wz 154 pass and 5 skip; without the variable 136 pass and 23 skip. All 29 upstream tests that failed in
+- Tests on Linux: 268 tests (159 before the review fixes); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
+  265 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
+  and Morph.wz 263 pass and 5 skip; without the variable 244 pass and 24 skip. All 29 upstream tests that failed in
   Phase 1 (they share `TestFixture`, which created a `System.Drawing.Bitmap`) now pass, because the fixture uses the raw
   pixel API under `LINUX_BUILD`. Two Phase 1 tests (`PlatformSupportTests`) were deleted with the stub they tested.
   The upstream test `ModifyToolsTests.CanvasAndPersistenceOps_Work` accepts an error from `set_canvas_bitmap`, and its
