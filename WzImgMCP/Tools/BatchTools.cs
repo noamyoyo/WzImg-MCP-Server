@@ -42,6 +42,11 @@ public class BatchTools
                 return new ExtractResult { Success = false, Error = $"Path not found: {wzPath}" };
             }
 
+            // The category names become file and directory names (input {category}.wz, output below outputDir):
+            // refuse anything but plain names before a directory is created.
+            var categoriesToExtract = GetExtractionCategories(wzPath, categories);
+            RequireSafeCategories(categoriesToExtract);
+
             if (!Directory.Exists(outputDir))
             {
                 Directory.CreateDirectory(outputDir);
@@ -50,7 +55,6 @@ public class BatchTools
             var mapleStoryPath = File.Exists(wzPath)
                 ? Path.GetDirectoryName(Path.GetFullPath(wzPath)) ?? Directory.GetCurrentDirectory()
                 : Path.GetFullPath(wzPath);
-            var categoriesToExtract = GetExtractionCategories(wzPath, categories);
             var encryption = ResolveEncryption(versionKey, wzPath);
             var effectiveVersionId = string.IsNullOrWhiteSpace(versionId)
                 ? $"extracted_{DateTime.UtcNow:yyyyMMddHHmmss}"
@@ -120,15 +124,21 @@ public class BatchTools
                 return new PackResult { Success = false, Error = $"Directory not found: {imgPath}" };
             }
 
-            if (!Directory.Exists(outputDir))
-            {
-                Directory.CreateDirectory(outputDir);
-            }
-
+            // The category names become output file and directory names ({category}.wz, Data/{category}):
+            // only plain names are accepted, and every output path is resolved through the path guard
+            // (symlinks followed) before a directory is created or the packer writes anything.
             var categoriesToPack = GetPackingCategories(imgPath, category);
+            RequireSafeCategories(categoriesToPack);
             if (categoriesToPack.Count == 0)
             {
                 return new PackResult { Success = false, Error = $"No IMG categories found in {imgPath}" };
+            }
+
+            GuardPackOutputs(outputDir, categoriesToPack);
+
+            if (!Directory.Exists(outputDir))
+            {
+                Directory.CreateDirectory(outputDir);
             }
 
             var existingWzFiles = Directory.EnumerateFiles(outputDir, "*.wz", SearchOption.TopDirectoryOnly)
@@ -514,6 +524,29 @@ public class BatchTools
             .Cast<string>()
             .OrderBy(name => name)
             .ToList();
+    }
+
+    /// <summary>Throws <see cref="PathNotAllowedException"/> unless every category is one plain name (no separator, "..", drive prefix).</summary>
+    internal static void RequireSafeCategories(IEnumerable<string> categories)
+    {
+        foreach (var category in categories)
+            PathGuard.RequireSafeComponent(category, "category");
+    }
+
+    /// <summary>
+    /// Resolves every path the packer will write below <paramref name="outputDir"/> through the path guard
+    /// (symlinks followed), so a symlink planted in the output directory cannot lead the packer outside the allowed root.
+    /// </summary>
+    internal static void GuardPackOutputs(string outputDir, IEnumerable<string> categories)
+    {
+        foreach (var fixedName in new[] { "Data.wz", "List.wz", "Data" })
+            PathGuard.Resolve(Path.Combine(outputDir, fixedName));
+        foreach (var category in categories)
+        {
+            PathGuard.Resolve(Path.Combine(outputDir, $"{category}.wz"));
+            PathGuard.Resolve(Path.Combine(outputDir, category));
+            PathGuard.Resolve(Path.Combine(outputDir, "Data", category));
+        }
     }
 
     private static List<string> ParseCategoryList(string? categories)
