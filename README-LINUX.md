@@ -244,6 +244,31 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     `GetLinkedWzCanvasBitmap` on Windows) instead of falling back to the linking canvas's own pixels, and the
     `ListWzUsed` setter works on the Linux build.
 
+    Fixes after the second independent review (all of them also apply to a Windows build and have not been tested there):
+
+23. **Server and MapleLib: `pack_to_wz` / `extract_to_img` categories.** Each entry of the `category` / `categories` list must be one plain
+    name (no separator, `..`, drive prefix, rooted path or control character), also without `WZIMG_ALLOWED_ROOT`. Before, a category such
+    as `../img/Map` put the packer output (`Map.wz`, `Data/Map`) outside the allowed root. `pack_to_wz` also resolves every file and
+    directory the packer writes (`Category.wz`, `Category`, `Data/Category`, `Data`, `Data.wz`, `List.wz`) through `PathGuard.Resolve` before
+    anything is created, and `WzPackingService.PackCategoryAsync` refuses a non-plain category itself.
+24. **Server: `PathGuard.WriteFileGuarded` and the single-file exports** (`export_png`, `export_mp3`, `export_to_md`) write to a new file next
+    to the target and rename it over the target, and refuse a symbolic link at the target, so a link planted between the path check and
+    the write is never followed.
+25. **Server: export names.** `batch_export_images` keeps image directory names unique within a category (`a/x.img` and `b/x.img`);
+    name sets compare ignoring case; sanitised names lose trailing dots and spaces, get a `_` prefix when they are a Windows reserved device
+    name (`CON`, `NUL`, `COM1` ...) and are cut to 150 UTF-8 bytes (not characters) at a character boundary.
+26. **Server, MapleLib: `set_canvas_bitmap` without `format`** keeps Format 3 / Format 1026 exactly, reports in `warning` when Format 517 had to
+    become 513, and stores `bgra8888` for a DXT canvas while `WZIMG_PRE_BIG_BANG` is on (see "Images"). `WzPngProperty.SetPixelsBgra32` has a new
+    optional `dxt3Grayscale` argument.
+27. **Server: `get_sound_data` and `resolve_sound_link`** omit the base64 audio data (with a `Truncated` note) above `WZIMG_MAX_RESPONSE_BYTES`.
+28. **Server: `export_to_md`** changes the extension to `.md` before the path guard resolves the path.
+
+Path audit of the tools: the only tool code that joins a user supplied string into a path with `Path.Combine` is in `BatchTools`
+(`batch_export_images` category: checked as a plain name; image directory and canvas file names: sanitised, unique, and written through
+`PathGuard`; `pack_to_wz` / `extract_to_img` categories: see 23). Every other tool passes its path argument through `PathGuard.Resolve`
+and does not join strings. Reads of images by category and image name go through MapleLib's `ImgFileSystemManager`, which checks the
+combined path against the version directory (lexically, symbolic links inside the data directory are not followed or checked there).
+
 ## What was not verified
 
 - **The Windows build and the Windows test suite were not run.** All building and testing was done in the Linux
@@ -252,9 +277,10 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
   built without `LINUX_BUILD` against System.Drawing.Common), never run; the Windows build of the whole solution could
   not be built here. The changes to MapleLib's encoders keep the same `LockBits` call on Windows but were not run
   there.
-- Tests on Linux: 268 tests (159 before the review fixes); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
-  265 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
-  and Morph.wz 263 pass and 5 skip; without the variable 244 pass and 24 skip. All 29 upstream tests that failed in
+- Tests on Linux: 357 tests (159 before the first review fixes, 268 before the second); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
+  354 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
+  and Morph.wz 352 pass and 5 skip; without the variable 333 pass and 24 skip. Tests that need symbolic links are reported as
+  skipped (not passed) where links cannot be created. All 29 upstream tests that failed in
   Phase 1 (they share `TestFixture`, which created a `System.Drawing.Bitmap`) now pass, because the fixture uses the raw
   pixel API under `LINUX_BUILD`. Two Phase 1 tests (`PlatformSupportTests`) were deleted with the stub they tested.
   The upstream test `ModifyToolsTests.CanvasAndPersistenceOps_Work` accepts an error from `set_canvas_bitmap`, and its
