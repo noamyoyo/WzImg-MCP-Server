@@ -1,3 +1,5 @@
+using MapleLib.WzLib.WzProperties;
+using Microsoft.Xna.Framework.Graphics;
 using WzImgMCP.Server;
 using WzImgMCP.Tools;
 using WzImgMCP.Utils;
@@ -70,5 +72,41 @@ public sealed class ExportNameCollisionTests : IClassFixture<TestFixture>, IDisp
         MarkdownTestHelper.AssertSuccess(new BatchTools(session).BatchExportImages("Character", outDir));
 
         Assert.Equal(2, Directory.GetDirectories(Path.Combine(outDir, "Character")).Length);
+    }
+
+    [Fact]
+    public void BatchExportImages_ImageNamesThatDifferOnlyInCase_GetSeparateDirectories()
+    {
+        // Two directories "Frame" and "frame" are one directory on Windows and on a case-insensitive mount.
+        using var session = SessionWithImages("Frame.img", "frame.img");
+        var outDir = Path.Combine(_sandbox, "out3");
+
+        MarkdownTestHelper.AssertSuccess(new BatchTools(session).BatchExportImages("Character", outDir));
+
+        var dirs = Directory.GetDirectories(Path.Combine(outDir, "Character")).Select(Path.GetFileName).ToArray();
+        Assert.Equal(2, dirs.Length);
+        Assert.Equal(2, dirs.Select(d => d!.ToLowerInvariant()).Distinct().Count());
+    }
+
+    [Fact]
+    public void ExportAllImages_CanvasNamesThatDifferOnlyInCase_GetSeparateFiles()
+    {
+        _fixture.InitializeDataSource();
+        var image = _fixture.Session.GetImage("Character", "Test.img");
+        var sub = new WzSubProperty("caseNames");
+        foreach (var name in new[] { "Frame", "frame", "FRAME" })
+        {
+            var canvas = new WzCanvasProperty(name) { PngProperty = new WzPngProperty() };
+            canvas.PngProperty.SetPixelsBgra32(new byte[4 * 4 * 4], 4, 4, SurfaceFormat.Bgra32);
+            sub.AddProperty(canvas);
+        }
+        image.AddProperty(sub);
+
+        var dir = Path.Combine(_sandbox, "case-files");
+        MarkdownTestHelper.AssertSuccess(new ExportTools(_fixture.Session).ExportAllImages("Character", "Test.img", dir, "caseNames"));
+
+        var files = Directory.GetFiles(dir).Select(Path.GetFileName).ToArray();
+        Assert.Equal(3, files.Length);
+        Assert.Equal(3, files.Select(f => f!.ToLowerInvariant()).Distinct().Count());
     }
 }

@@ -242,7 +242,7 @@ public class BatchTools
 
                 // One directory per image: images in different sub directories can share a file name, and different
                 // names can sanitise to the same one, so the directory names are made unique per category.
-                var imageDirNames = new HashSet<string>(StringComparer.Ordinal);
+                var imageDirNames = PathGuard.NewNameSet();
 
                 foreach (var img in ds.GetImagesInCategory(category))
                 {
@@ -359,7 +359,7 @@ public class BatchTools
         if (count >= max) return;
 
         // One name set per image: canvases whose sanitised names collide get a numeric suffix instead of overwriting each other.
-        var usedNames = new HashSet<string>(StringComparer.Ordinal);
+        var usedNames = PathGuard.NewNameSet();
         foreach (var prop in img.WzProperties ?? Enumerable.Empty<MapleLib.WzLib.WzImageProperty>())
         {
             ExportCanvasesRecursive(prop, "", outputDir, format, exported, failed, ref count, max, usedNames);

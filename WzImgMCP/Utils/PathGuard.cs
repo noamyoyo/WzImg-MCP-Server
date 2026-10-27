@@ -93,7 +93,9 @@ public static class PathGuard
 
     /// <summary>
     /// Turns arbitrary text (a canvas name, a property path) into one safe file name: separators, colons, control
-    /// characters and ".." are replaced by '_'. Never empty.
+    /// characters and ".." are replaced by '_'. Trailing dots and spaces are removed (Windows drops them, so two names
+    /// would become one file) and a Windows reserved device name (CON, NUL, COM1 ..., with or without an extension)
+    /// gets a '_' prefix. Never empty.
     /// </summary>
     public static string SanitizeFileName(string? text, string fallback = "unnamed")
     {
@@ -101,11 +103,37 @@ public static class PathGuard
         foreach (var ch in text ?? "")
             sb.Append(ch is '/' or '\\' or ':' || char.IsControl(ch) ? '_' : ch);
         var s = sb.ToString().Replace("..", "__").Trim();
+        if (s.Length > 150) s = s.Substring(0, 150);
+        s = s.TrimEnd('.', ' ');
         if (s.Trim('.').Length == 0) return fallback;
-        return s.Length > 150 ? s.Substring(0, 150) : s;
+        return IsReservedDeviceName(s) ? "_" + s : s;
     }
 
-    /// <summary>Returns <paramref name="name"/>, or name_2, name_3 ... when it is already in <paramref name="used"/>; records the result.</summary>
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
+    };
+
+    /// <summary>True for a Windows reserved device name, also when it has an extension ("nul.txt") or trailing spaces before the dot.</summary>
+    private static bool IsReservedDeviceName(string fileName)
+    {
+        var dot = fileName.IndexOf('.');
+        var stem = (dot < 0 ? fileName : fileName.Substring(0, dot)).TrimEnd(' ');
+        return ReservedDeviceNames.Contains(stem);
+    }
+
+    /// <summary>
+    /// A set for <see cref="UniqueName"/>. File names are compared ignoring case: "Frame" and "frame" are one file on
+    /// Windows and on a case-insensitive Linux mount.
+    /// </summary>
+    public static HashSet<string> NewNameSet() => new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Returns <paramref name="name"/>, or name_2, name_3 ... when it is already in <paramref name="used"/>; records the result.
+    /// Pass a set from <see cref="NewNameSet"/> so the comparison ignores case.
+    /// </summary>
     public static string UniqueName(string name, ISet<string> used)
     {
         var candidate = name;

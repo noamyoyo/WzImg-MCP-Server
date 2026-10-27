@@ -256,7 +256,7 @@ public class ExportTools
             var exported = new List<ExportedItem>();
             var failed = new List<FailedItem>();
 
-            ExportCanvasesRecursive(target, "", outputDir, exported, failed, 0, maxDepth, new HashSet<string>(StringComparer.Ordinal));
+            ExportCanvasesRecursive(target, "", outputDir, exported, failed, 0, maxDepth, PathGuard.NewNameSet());
 
             return new BatchExportResult
             {
@@ -315,7 +315,7 @@ public class ExportTools
             var exported = new List<ExportedItem>();
             var failed = new List<FailedItem>();
 
-            ExportSoundsRecursive(target, "", outputDir, exported, failed, 0, maxDepth, new HashSet<string>(StringComparer.Ordinal));
+            ExportSoundsRecursive(target, "", outputDir, exported, failed, 0, maxDepth, PathGuard.NewNameSet());
 
             return new BatchExportResult
             {
