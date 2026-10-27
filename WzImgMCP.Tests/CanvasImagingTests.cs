@@ -749,5 +749,41 @@ public sealed class CanvasImagingTests : IClassFixture<TestFixture>, IDisposable
         Assert.Equal(odd, PixelsOf("dxtKeep", out _, out _));
     }
 
+    [Fact]
+    public void LinkedPixels_ALinkToACanvasWithoutPixels_GivesNoImage_LikeWindows()
+    {
+        var image = _fixture.Session.GetImage(Cat, Img);
+        var own = Noise(6, 6, 41);
+        var target = new WzCanvasProperty("linkTargetNoPixels");            // no pixel property at all
+        var good = CanvasOf(Noise(3, 3, 42), 3, 3);
+        good.Name = "linkTargetGood";
+        image.AddProperty(target);
+        image.AddProperty(good);
+
+        WzCanvasProperty Linker(string name, string link)
+        {
+            var c = CanvasOf(own, 6, 6);
+            c.Name = name;
+            c.AddProperty(new WzStringProperty("_inlink", link));
+            image.AddProperty(c);
+            return c;
+        }
+
+        // A link that leads to a canvas without pixel data has no image: it must not fall back to the linker's own pixels.
+        Assert.Null(Linker("linkerNoPixels", "linkTargetNoPixels").GetLinkedPixelsBgra32(out int w, out int h));
+        Assert.Equal((0, 0), (w, h));
+        Assert.False(CanvasImaging.HasDecodableImage(Linker("linkerNoPixels2", "linkTargetNoPixels")));
+        Assert.Null(CanvasImaging.EncodeCanvas(Linker("linkerNoPixels3", "linkTargetNoPixels"), ExportImageFormat.Png, out _, out _));
+
+        // A link to a canvas with pixels returns those pixels; a link that does not resolve falls back to the canvas itself.
+        Assert.Equal(good.GetLinkedPixelsBgra32(out _, out _), Linker("linkerGood", "linkTargetGood").GetLinkedPixelsBgra32(out w, out h));
+        Assert.Equal((3, 3), (w, h));
+        Assert.Equal(own, Linker("linkerBroken", "does/not/exist").GetLinkedPixelsBgra32(out w, out h));
+        Assert.Equal((6, 6), (w, h));
+
+        // And without any link a canvas without pixels simply has none.
+        Assert.Null(new WzCanvasProperty("plain").GetLinkedPixelsBgra32(out _, out _));
+    }
+
     #endregion
 }
