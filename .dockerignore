@@ -1,0 +1,13 @@
+.git
+**/.git
+**/bin
+**/obj
+**/*.user
+Dockerfile
+.dockerignore
+WzImgMCP.Tests
+MapleLib/.github
+MapleLib/docs
+MapleLib/benchmarks
+MapleLib/MapleLib.Tests
+MapleLib/spine-runtimes-4.1-ns
