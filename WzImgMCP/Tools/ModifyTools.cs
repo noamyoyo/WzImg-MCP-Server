@@ -709,12 +709,18 @@ public class ModifyTools
                 return new DiscardResult { Success = false, Error = $"Image not found: {category}/{image}" };
             }
 
-            // Unparse and re-parse to reload from disk
+            // Reload from disk. Edit tools set Changed, and ParseImage() returns early for a changed image
+            // without reading any data, so clear the flag first and force the read. Without this the image
+            // stays empty and a later save_image / pack_to_wz writes the empty image.
+            img.Changed = false;
             if (img.Parsed)
             {
                 img.UnparseImage();
             }
-            img.ParseImage();
+            if (!img.ParseImage(forceReadFromData: true) || !img.Parsed)
+            {
+                return new DiscardResult { Success = false, Error = $"Could not reload {category}/{image} from disk" };
+            }
 
             return new DiscardResult
             {
