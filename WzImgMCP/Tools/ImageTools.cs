@@ -24,6 +24,7 @@ public class ImageTools : ToolBase
     {
         return Execute(() =>
         {
+            PlatformSupport.RequireBitmaps("get_canvas_bitmap");
             var prop = GetRequiredProperty<WzCanvasProperty>(category, image, path, "Canvas");
             var base64 = WzDataConverter.GetCanvasBase64(prop)
                 ?? throw new InvalidOperationException("Failed to extract bitmap");
@@ -98,6 +99,8 @@ public class ImageTools : ToolBase
     {
         return Execute(() =>
         {
+            if (!metadataOnly)
+                PlatformSupport.RequireBitmaps("get_animation_frames with metadataOnly=false (image data; metadata only works)");
             var img = GetImage(category, image);
             var prop = img.GetFromPath(path)
                 ?? throw new InvalidOperationException($"Property not found: {path}");
@@ -233,7 +236,8 @@ public class ImageTools : ToolBase
                         LinkPath = targetPath,
                         Width = targetProp.PngProperty?.Width ?? 0,
                         Height = targetProp.PngProperty?.Height ?? 0,
-                        Base64Png = WzDataConverter.GetCanvasBase64(targetProp)
+                        Base64Png = PlatformSupport.BitmapsSupported ? WzDataConverter.GetCanvasBase64(targetProp) : null,
+                        ImageNote = PlatformSupport.BitmapsSupported ? null : PlatformSupport.BitmapUnavailableMessage("resolve_canvas_link (image data)")
                     };
                 }
                 throw new InvalidOperationException($"Inlink target not found: {targetPath}");
@@ -251,7 +255,8 @@ public class ImageTools : ToolBase
                 LinkType = "none",
                 Width = prop.PngProperty?.Width ?? 0,
                 Height = prop.PngProperty?.Height ?? 0,
-                Base64Png = WzDataConverter.GetCanvasBase64(prop)
+                Base64Png = PlatformSupport.BitmapsSupported ? WzDataConverter.GetCanvasBase64(prop) : null,
+                ImageNote = PlatformSupport.BitmapsSupported ? null : PlatformSupport.BitmapUnavailableMessage("resolve_canvas_link (image data)")
             };
         });
     }
@@ -368,5 +373,6 @@ public class ResolveCanvasData
     public int Width { get; init; }
     public int Height { get; init; }
     public string? Base64Png { get; init; }
+    public string? ImageNote { get; init; }
 }
 

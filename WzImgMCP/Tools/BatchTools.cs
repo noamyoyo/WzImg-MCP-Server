@@ -196,6 +196,7 @@ public class BatchTools
 
         try
         {
+            PlatformSupport.RequireBitmaps("batch_export_images");
             outputDir = PathGuard.Resolve(outputDir);
             var ds = _session.DataSource;
             IEnumerable<string> categoryList;

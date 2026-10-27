@@ -125,6 +125,7 @@ public class ExportTools
 
         try
         {
+            PlatformSupport.RequireBitmaps("export_png");
             outputPath = PathGuard.Resolve(outputPath);
             var img = _session.GetImage(category, image);
             var prop = img.GetFromPath(path) as WzCanvasProperty;
@@ -230,6 +231,7 @@ public class ExportTools
 
         try
         {
+            PlatformSupport.RequireBitmaps("export_all_images");
             outputDir = PathGuard.Resolve(outputDir);
             var img = _session.GetImage(category, image);
             WzObject target;

@@ -295,6 +295,7 @@ public class AnalysisTools
 
         try
         {
+            PlatformSupport.RequireBitmaps("validate_image");
             var img = _session.GetImage(category, image);
             var issues = new List<ValidationIssue>();
             var stats = new ValidationStats();

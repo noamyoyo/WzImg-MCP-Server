@@ -6,6 +6,7 @@ using WzImgMCP.Core;
 using WzImgMCP.Server;
 using MapleLib.WzLib;
 using MapleLib.WzLib.WzProperties;
+using WzImgMCP.Utils;
 
 namespace WzImgMCP.Tools;
 
@@ -435,6 +436,7 @@ public class ModifyTools
 
         try
         {
+            PlatformSupport.RequireBitmaps("set_canvas_bitmap");
             var img = _session.GetImage(category, image);
             var prop = img.GetFromPath(path) as WzCanvasProperty;
 
@@ -539,6 +541,7 @@ public class ModifyTools
 
         try
         {
+            PlatformSupport.RequireBitmaps("import_png");
             var img = _session.GetImage(category, image);
 
             IPropertyContainer parent;
