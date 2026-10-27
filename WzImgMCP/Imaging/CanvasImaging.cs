@@ -189,20 +189,68 @@ public static class CanvasImaging
     /// </summary>
     public static SurfaceFormat ResolveReplacementFormat(string? format, WzPngProperty? current, int width, int height, out string? note)
     {
-        note = null;
+        var r = ResolveReplacement(format, current, width, height);
+        note = r.Note;
+        return r.Surface;
+    }
+
+    /// <summary>The storage chosen for a replacement image: the surface format, the DXT3 sub format to force, and a note for the caller.</summary>
+    public readonly record struct ReplacementFormat(SurfaceFormat Surface, bool? Dxt3Grayscale, string? Note);
+
+    /// <summary>
+    /// Like <see cref="ResolveReplacementFormat"/>, and exact about the format tag. Without an explicit format:
+    /// Format3 stays Format3 and Format1026 stays Format1026 (<see cref="ReplacementFormat.Dxt3Grayscale"/> forces the tag
+    /// instead of letting the encoder guess it from the pixels); Format517 is requested as RGB565, which the encoder writes as
+    /// Format517 when the image is a multiple of 16 in both directions and every 16x16 block is one colour, otherwise as Format513
+    /// (<see cref="DescribeFormatChange"/> reports that); a DXT canvas becomes bgra8888 when WZIMG_PRE_BIG_BANG is on, because
+    /// a pre Big Bang client cannot read DXT.
+    /// </summary>
+    public static ReplacementFormat ResolveReplacement(string? format, WzPngProperty? current, int width, int height)
+    {
         if (!string.IsNullOrWhiteSpace(format))
-            return ParseFormat(format) ?? SurfaceFormat.Bgra32;
+            return new ReplacementFormat(ParseFormat(format) ?? SurfaceFormat.Bgra32, null, null);
 
         SurfaceFormat? kept = SurfaceFormatOf(current);
         if (kept == null)
-            return SurfaceFormat.Bgra32;
-        if ((kept == SurfaceFormat.Dxt3 || kept == SurfaceFormat.Dxt5) && (width % 4 != 0 || height % 4 != 0))
+            return new ReplacementFormat(SurfaceFormat.Bgra32, null, null);
+
+        bool isDxt = kept == SurfaceFormat.Dxt3 || kept == SurfaceFormat.Dxt5;
+        if (isDxt && MapleLib.Helpers.ImageFormatDetector.UsePreBigBangImageFormats)
         {
-            note = $"The canvas was stored as {current!.Format} (DXT), which needs a width and height that are multiples of 4; " +
-                   $"the {width}x{height} image was stored as bgra8888 instead. Pass format to choose another format.";
-            return SurfaceFormat.Bgra32;
+            return new ReplacementFormat(SurfaceFormat.Bgra32, null,
+                $"WZIMG_PRE_BIG_BANG is on and a pre Big Bang client cannot read DXT: the canvas was stored as {current!.Format} (DXT), " +
+                "the new image was stored as bgra8888 instead. Pass format=dxt3 or dxt5 to store DXT anyway.");
         }
-        return kept.Value;
+        if (isDxt && (width % 4 != 0 || height % 4 != 0))
+        {
+            return new ReplacementFormat(SurfaceFormat.Bgra32, null,
+                $"The canvas was stored as {current!.Format} (DXT), which needs a width and height that are multiples of 4; " +
+                $"the {width}x{height} image was stored as bgra8888 instead. Pass format to choose another format.");
+        }
+
+        bool? dxt3Grayscale = current!.Format switch
+        {
+            WzPngFormat.Format3 => true,
+            WzPngFormat.Format1026 => false,
+            _ => null
+        };
+        return new ReplacementFormat(kept.Value, dxt3Grayscale, null);
+    }
+
+    /// <summary>
+    /// A note for a replacement without an explicit format that did not end up in the format the canvas had (null when it
+    /// did). The known case is Format517, which only stores images that are a multiple of 16 with one colour per 16x16 block.
+    /// </summary>
+    public static string? DescribeFormatChange(WzPngFormat? before, WzPngFormat after)
+    {
+        if (before == null || before == after)
+            return null;
+        if (before == WzPngFormat.Format517)
+        {
+            return $"The canvas was stored as {before} (one RGB565 colour per 16x16 block), which can only hold an image whose width and height " +
+                   $"are multiples of 16 and where every 16x16 block is one colour; the new image was stored as {after} instead.";
+        }
+        return $"The canvas was stored as {before}; the new image was stored as {after} instead. Pass format to choose a format.";
     }
 
     #endregion
@@ -321,13 +369,16 @@ public static class CanvasImaging
     public static void SetCanvasFromPng(WzPngProperty target, byte[] png, string? format, out int width, out int height)
         => SetCanvasFromPng(target, png, ParseFormat(format) ?? SurfaceFormat.Bgra32, out width, out height);
 
-    /// <summary>Decodes a PNG and stores it in the canvas pixel property in the given WZ pixel format.</summary>
-    public static void SetCanvasFromPng(WzPngProperty target, byte[] png, SurfaceFormat force, out int width, out int height)
+    /// <summary>
+    /// Decodes a PNG and stores it in the canvas pixel property in the given WZ pixel format.
+    /// <paramref name="dxt3Grayscale"/> (only for <see cref="SurfaceFormat.Dxt3"/>) forces Format3 (true) or Format1026 (false).
+    /// </summary>
+    public static void SetCanvasFromPng(WzPngProperty target, byte[] png, SurfaceFormat force, out int width, out int height, bool? dxt3Grayscale = null)
     {
         (int declaredWidth, int declaredHeight) = ReadAndCheckPngHeader(png);
 #if LINUX_BUILD
         byte[] bgra = SkiaDecodePng(png, declaredWidth, declaredHeight, out width, out height);
-        target.SetPixelsBgra32(bgra, width, height, force);
+        target.SetPixelsBgra32(bgra, width, height, force, dxt3Grayscale);
 #else
         using var ms = new MemoryStream(png, writable: false);
         using var bitmap = new Bitmap(ms);
@@ -342,7 +393,7 @@ public static class CanvasImaging
             byte[] bgra = new byte[checked(width * height * 4)];
             for (int y = 0; y < height; y++)
                 Marshal.Copy(data.Scan0 + y * data.Stride, bgra, y * width * 4, width * 4);
-            target.SetPixelsBgra32(bgra, width, height, force);
+            target.SetPixelsBgra32(bgra, width, height, force, dxt3Grayscale);
         }
         finally
         {

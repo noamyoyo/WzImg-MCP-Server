@@ -77,8 +77,16 @@ What to know about the formats:
 
 - `format=auto` (and no `format` for `import_png`) stores lossless `bgra8888`. MapleLib's own content based choice (4444,
   565, 1555, DXT) is never used by these two tools; ask for a lossy format explicitly if you want a smaller canvas.
-  `set_canvas_bitmap` without `format` keeps the canvas's current format (a DXT canvas that would get an image whose size
-  is not a multiple of four falls back to `bgra8888` and the result carries a `warning`).
+  `set_canvas_bitmap` without `format` keeps the canvas's current format. The exact cases:
+  - Format 1, 2, 257, 513, 2050 and 1026 keep their number. Format 3 (DXT3 "grayscale") and Format 1026 (DXT3) are two tags for
+    the same pixel data; the tag of the canvas is kept whatever the new image looks like (it is not guessed from the pixels).
+    With an explicit `format=dxt3` the encoder still chooses the tag from the pixels (Format 3 for grey images).
+  - Format 517 (one RGB565 colour per 16x16 block) is kept only when the new image is a multiple of 16 wide and high and every
+    16x16 block is one colour after quantisation; any other image is stored as Format 513 and the result carries a `warning`.
+  - A DXT canvas (3, 1026, 2050) becomes `bgra8888` with a `warning` when the new image's size is not a multiple of four, and
+    also when `WZIMG_PRE_BIG_BANG` is on (the default), because a pre Big Bang client cannot read DXT. `format=dxt3` / `dxt5`
+    still stores DXT on request.
+  - BC7 (4098) cannot be written and becomes `bgra8888` (with a `warning`). A canvas without pixels gets `bgra8888`.
 - No drift: the 5 and 6 bit quantiser rounds to the nearest value (`round(v * 31 / 255)`, `round(v * 63 / 255)`), which
   inverts the decoders' bit replication. Decoding a 565, 1555 or 4444 canvas and encoding it again returns the same
   values (tested for all 65,536 16 bit values of each format), so export, edit, import cycles do not darken the image.

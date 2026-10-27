@@ -423,7 +423,7 @@ public class ModifyTools
         }
     }
 
-    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG (a canvas with an _inlink / _outlink keeps displaying its link target: the result then carries a warning). Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MiB are refused. Unless format is given, the canvas keeps the pixel format it has (bgra8888 for a canvas without pixels), so export, edit and import does not change the format; 4444, 565, 1555 and DXT formats are lossy.")]
+    [McpServerTool(Name = "set_canvas_bitmap"), Description("Replace a canvas image with a new PNG (a canvas with an _inlink / _outlink keeps displaying its link target: the result then carries a warning). Give the PNG either as base64Png or as pngPath (a file inside the allowed root). PNGs above 4096x4096 pixels or 20 MiB are refused. Unless format is given, the canvas keeps the pixel format it has (bgra8888 for a canvas without pixels), so export, edit and import does not change the format; 4444, 565, 1555 and DXT formats are lossy. Exact cases: Format3 and Format1026 keep their number; Format517 stays only for an image that is a multiple of 16 in both directions with one colour per 16x16 block, otherwise it becomes Format513 (with a warning); a DXT canvas becomes bgra8888 (with a warning) when the image size is not a multiple of 4 or when WZIMG_PRE_BIG_BANG is on; BC7 becomes bgra8888.")]
     public string SetCanvasBitmap(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -451,11 +451,17 @@ public class ModifyTools
 
             var oldSize = $"{prop.PngProperty?.Width}x{prop.PngProperty?.Height}";
             (int declaredWidth, int declaredHeight) = WzImgMCP.Imaging.CanvasImaging.ReadAndCheckPngHeader(pngData);
-            var surface = WzImgMCP.Imaging.CanvasImaging.ResolveReplacementFormat(format, prop.PngProperty, declaredWidth, declaredHeight, out var note);
+            var replacement = WzImgMCP.Imaging.CanvasImaging.ResolveReplacement(format, prop.PngProperty, declaredWidth, declaredHeight);
+            var note = replacement.Note;
+            // The format the canvas had before, or null when it had no pixels or an explicit format was asked for.
+            WzPngFormat? formatBefore = string.IsNullOrWhiteSpace(format) && WzImgMCP.Imaging.CanvasImaging.SurfaceFormatOf(prop.PngProperty) != null
+                ? prop.PngProperty!.Format
+                : null;
             // A canvas without a pixel property gets one only after the PNG was decoded and stored: a refused call changes nothing.
             var pixelTarget = prop.PngProperty ?? new WzPngProperty();
-            WzImgMCP.Imaging.CanvasImaging.SetCanvasFromPng(pixelTarget, pngData, surface, out var newWidth, out var newHeight);
+            WzImgMCP.Imaging.CanvasImaging.SetCanvasFromPng(pixelTarget, pngData, replacement.Surface, out var newWidth, out var newHeight, replacement.Dxt3Grayscale);
             prop.PngProperty = pixelTarget;
+            note ??= WzImgMCP.Imaging.CanvasImaging.DescribeFormatChange(formatBefore, pixelTarget.Format);
 
             img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
