@@ -56,7 +56,7 @@ public class AudioTools
         }
     }
 
-    [McpServerTool(Name = "get_sound_data"), Description("Get raw audio data as base64")]
+    [McpServerTool(Name = "get_sound_data"), Description("Get raw audio data as base64 (omitted with a note when the base64 text would exceed the response limit, 8 MiB by default; use export_mp3 then)")]
     public string GetSoundData(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -83,6 +83,7 @@ public class AudioTools
                 return new SoundDataResult { Success = false, Error = "Failed to extract sound data" };
             }
 
+            var base64 = EncodeCapped(data, out var note);
             return new SoundDataResult
             {
                 Success = true,
@@ -90,7 +91,8 @@ public class AudioTools
                 Length = prop.Length,
                 Frequency = prop.Frequency,
                 DataSize = data.Length,
-                Base64Data = Convert.ToBase64String(data)
+                Base64Data = base64,
+                Note = note
             };
         }
         catch (Exception ex)
@@ -132,7 +134,7 @@ public class AudioTools
         }
     }
 
-    [McpServerTool(Name = "resolve_sound_link"), Description("Resolve UOL link to actual sound property")]
+    [McpServerTool(Name = "resolve_sound_link"), Description("Resolve UOL link to actual sound property (the audio data is omitted with a note when its base64 text would exceed the response limit, 8 MiB by default)")]
     public string ResolveSoundLink(
         [Description("Category name")] string category,
         [Description("Image name")] string image,
@@ -168,6 +170,7 @@ public class AudioTools
                 }
 
                 var data = target.GetBytes(false);
+                var base64 = EncodeCapped(data, out var note);
                 return new ResolveSoundResult
                 {
                     Success = true,
@@ -177,7 +180,8 @@ public class AudioTools
                     Length = target.Length,
                     Frequency = target.Frequency,
                     DataSize = data?.Length ?? 0,
-                    Base64Data = data != null ? Convert.ToBase64String(data) : null
+                    Base64Data = base64,
+                    Note = note
                 };
             }
 
@@ -185,6 +189,7 @@ public class AudioTools
             if (prop is WzBinaryProperty sound)
             {
                 var data = sound.GetBytes(false);
+                var base64 = EncodeCapped(data, out var note);
                 return new ResolveSoundResult
                 {
                     Success = true,
@@ -192,7 +197,8 @@ public class AudioTools
                     Length = sound.Length,
                     Frequency = sound.Frequency,
                     DataSize = data?.Length ?? 0,
-                    Base64Data = data != null ? Convert.ToBase64String(data) : null
+                    Base64Data = base64,
+                    Note = note
                 };
             }
 
@@ -206,6 +212,26 @@ public class AudioTools
         {
             return new ResolveSoundResult { Success = false, Error = ex.Message };
         }
+    }
+
+    /// <summary>
+    /// Base64 text of the sound data, or null with a "Truncated" note when the text would exceed WZIMG_MAX_RESPONSE_BYTES
+    /// (the same limit and wording style as the image tools). Null without a note when there is no data.
+    /// </summary>
+    internal static string? EncodeCapped(byte[]? data, out string? note)
+    {
+        note = null;
+        if (data == null)
+            return null;
+        long chars = 4L * ((data.Length + 2L) / 3);
+        long limit = Utils.ServerSettings.MaxResponseBytes;
+        if (chars > limit)
+        {
+            note = $"Sound data omitted: the base64 text would be {chars:N0} characters, above the limit of {limit:N0} " +
+                   "(WZIMG_MAX_RESPONSE_BYTES). Truncated: use export_mp3 to write the sound to a file.";
+            return null;
+        }
+        return Convert.ToBase64String(data);
     }
 
     private void FindSounds(WzObject obj, string path, List<SoundEntry> results, int depth, int maxDepth)
@@ -265,6 +291,7 @@ public class SoundDataResult : MarkdownResultBase
     public int Frequency { get; set; }
     public int DataSize { get; set; }
     public string? Base64Data { get; set; }
+    public string? Note { get; set; }
 }
 
 public class SoundListResult : MarkdownResultBase
@@ -295,6 +322,7 @@ public class ResolveSoundResult : MarkdownResultBase
     public int Frequency { get; set; }
     public int DataSize { get; set; }
     public string? Base64Data { get; set; }
+    public string? Note { get; set; }
 }
 
 
