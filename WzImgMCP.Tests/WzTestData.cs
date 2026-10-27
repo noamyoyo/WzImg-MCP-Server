@@ -35,6 +35,9 @@ public static class WzTestData
         return root;
     });
 
+    /// <summary>The shared extraction of String.wz. Read only: tests must work on a copy.</summary>
+    public static string ExtractedStringRoot => SharedExtraction.Value;
+
     /// <summary>Runs extract_to_img on a WZ file with the given key (GMS, BMS, ...) as version v83.</summary>
     public static string Extract(string wzFile, string outputDir, string versionKey)
         => new BatchTools(new WzSessionManager())
