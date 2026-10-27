@@ -36,6 +36,7 @@ public class ExportTools
 
         try
         {
+            outputPath = PathGuard.ResolveOptional(outputPath);
             // Clamp maxDepth
             maxDepth = Math.Clamp(maxDepth, 1, 10);
 
@@ -124,6 +125,7 @@ public class ExportTools
 
         try
         {
+            outputPath = PathGuard.Resolve(outputPath);
             var img = _session.GetImage(category, image);
             var prop = img.GetFromPath(path) as WzCanvasProperty;
 
@@ -175,6 +177,7 @@ public class ExportTools
 
         try
         {
+            outputPath = PathGuard.Resolve(outputPath);
             var img = _session.GetImage(category, image);
             var prop = img.GetFromPath(path) as WzBinaryProperty;
 
@@ -227,6 +230,7 @@ public class ExportTools
 
         try
         {
+            outputDir = PathGuard.Resolve(outputDir);
             var img = _session.GetImage(category, image);
             WzObject target;
 
@@ -285,6 +289,7 @@ public class ExportTools
 
         try
         {
+            outputDir = PathGuard.Resolve(outputDir);
             var img = _session.GetImage(category, image);
             WzObject target;
 

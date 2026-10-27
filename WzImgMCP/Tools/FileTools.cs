@@ -2,6 +2,7 @@
 using ModelContextProtocol.Server;
 using WzImgMCP.Core;
 using WzImgMCP.Server;
+using WzImgMCP.Utils;
 
 namespace WzImgMCP.Tools;
 
@@ -19,6 +20,7 @@ public class FileTools : ToolBase
     {
         return ExecuteRaw(() =>
         {
+            basePath = PathGuard.Resolve(basePath);
             var info = Session.InitDataSource(basePath);
             return new DataSourceData
             {
@@ -40,6 +42,7 @@ public class FileTools : ToolBase
     {
         return ExecuteRaw(() =>
         {
+            path = PathGuard.Resolve(path);
             var sources = Session.ScanForDataSources(path, recursive);
             return new ScanData
             {

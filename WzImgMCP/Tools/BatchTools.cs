@@ -5,6 +5,7 @@ using WzImgMCP.Server;
 using MapleLib.Img;
 using MapleLib.WzLib;
 using MapleLib.WzLib.Util;
+using WzImgMCP.Utils;
 
 namespace WzImgMCP.Tools;
 
@@ -34,6 +35,8 @@ public class BatchTools
     {
         try
         {
+            wzPath = PathGuard.Resolve(wzPath);
+            outputDir = PathGuard.Resolve(outputDir);
             if (!Directory.Exists(wzPath) && !File.Exists(wzPath))
             {
                 return new ExtractResult { Success = false, Error = $"Path not found: {wzPath}" };
@@ -110,6 +113,8 @@ public class BatchTools
     {
         try
         {
+            imgPath = PathGuard.Resolve(imgPath);
+            outputDir = PathGuard.Resolve(outputDir);
             if (!Directory.Exists(imgPath))
             {
                 return new PackResult { Success = false, Error = $"Directory not found: {imgPath}" };
@@ -191,6 +196,7 @@ public class BatchTools
 
         try
         {
+            outputDir = PathGuard.Resolve(outputDir);
             var ds = _session.DataSource;
             IEnumerable<string> categoryList;
 
