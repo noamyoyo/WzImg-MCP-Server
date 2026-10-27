@@ -165,4 +165,50 @@ public class CanvasRealDataTests
         Assert.Contains(imageName, changed);
         Assert.All(changed, f => Assert.True(f == imageName || f == "replacement.png" || f.Contains("_BAK_"), "unexpected change: " + f));
     }
+
+    [SkippableFact]
+    public void ListWzUsed_Setter_ReallyChangesTheLayout_AndKeepsFormatAndPixels()
+    {
+        var wzPath = Find("Morph.wz");
+        Skip.If(wzPath == null, "Morph.wz is not in " + WzTestData.EnvVar);
+
+        using var wz = new WzFile(wzPath!, MapleLib.WzLib.WzMapleVersion.GMS);
+        Assert.Equal(WzFileParseStatus.Success, wz.ParseWzFile());
+
+        int checkedCanvases = 0;
+        foreach (var (path, canvas) in AllCanvases(wz.WzDirectory, ""))
+        {
+            var png = canvas.PngProperty;
+            if (png == null) continue;
+            var pixels = png.GetPixelsBgra32(out int w, out int h);
+            if (pixels == null) continue;
+            var format = png.Format;
+            Assert.False(png.ListWzUsed);
+
+            png.ListWzUsed = true;
+            Assert.True(png.ListWzUsed);
+            Assert.Equal(format, png.Format);
+            Assert.Equal(pixels, png.GetPixelsBgra32(out _, out _));   // decoding through the list layout gives the same pixels
+            Assert.True(png.ListWzUsed);                                 // and decoding does not undo the setting
+
+            png.ListWzUsed = false;
+            Assert.False(png.ListWzUsed);
+            Assert.Equal(format, png.Format);
+            Assert.Equal(pixels, png.GetPixelsBgra32(out _, out _));
+            Assert.False(png.ListWzUsed);
+
+            if (++checkedCanvases == 12) break;
+        }
+        Assert.True(checkedCanvases > 0);
+    }
+
+    [Fact]
+    public void ListWzUsed_Setter_OnAPropertyWithoutPixels_JustSetsTheFlag()
+    {
+        var png = new WzPngProperty();
+        png.ListWzUsed = true;
+        Assert.True(png.ListWzUsed);
+        png.ListWzUsed = false;
+        Assert.False(png.ListWzUsed);
+    }
 }
