@@ -1,6 +1,7 @@
 using MapleLib.Img;
 using MapleLib.WzLib;
 using System.Text.Json;
+using WzImgMCP.Utils;
 
 namespace WzImgMCP.Server;
 
@@ -74,11 +75,23 @@ public class WzSessionManager : IDisposable
             return found;
         }
 
-        var searchOption = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+        // Do not follow symbolic links / junctions (they could lead out of the allowed root) and
+        // check every result against the allowed root as well.
+        var enumeration = new EnumerationOptions
+        {
+            RecurseSubdirectories = recursive,
+            AttributesToSkip = FileAttributes.ReparsePoint,
+            IgnoreInaccessible = true
+        };
 
-        foreach (var dir in Directory.EnumerateDirectories(path, "*", searchOption))
+        foreach (var dir in Directory.EnumerateDirectories(path, "*", enumeration))
         {
             var manifestPath = Path.Combine(dir, "manifest.json");
+            if (!IsAllowed(dir) || !IsAllowed(manifestPath))
+            {
+                continue;
+            }
+
             if (File.Exists(manifestPath))
             {
                 try
@@ -106,7 +119,7 @@ public class WzSessionManager : IDisposable
 
         // Also check the root path
         var rootManifest = Path.Combine(path, "manifest.json");
-        if (File.Exists(rootManifest))
+        if (IsAllowed(rootManifest) && File.Exists(rootManifest))
         {
             try
             {
@@ -128,6 +141,20 @@ public class WzSessionManager : IDisposable
         }
 
         return found;
+    }
+
+    /// <summary>True when the path (after resolving symbolic links) is inside WZIMG_ALLOWED_ROOT, or no root is set.</summary>
+    private static bool IsAllowed(string path)
+    {
+        try
+        {
+            PathGuard.Resolve(path);
+            return true;
+        }
+        catch (PathNotAllowedException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
