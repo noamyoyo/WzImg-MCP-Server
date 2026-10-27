@@ -47,6 +47,7 @@ public class ModifyTools
             var oldValue = prop.Value;
             prop.Value = value;
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -98,6 +99,7 @@ public class ModifyTools
                     return new ModifyResult { Success = false, Error = $"Integer property not found: {path}" };
             }
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -145,6 +147,7 @@ public class ModifyTools
                     return new ModifyResult { Success = false, Error = $"Float property not found: {path}" };
             }
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -186,6 +189,7 @@ public class ModifyTools
             prop.X.Value = x;
             prop.Y.Value = y;
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -250,6 +254,7 @@ public class ModifyTools
 
             parent.AddProperty(newProp);
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new AddPropertyResult
             {
                 Success = true,
@@ -294,6 +299,7 @@ public class ModifyTools
 
             parent.RemoveProperty(prop);
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new DeleteResult
             {
                 Success = true,
@@ -332,6 +338,7 @@ public class ModifyTools
             var oldName = prop.Name;
             prop.Name = newName;
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new RenameResult
             {
                 Success = true,
@@ -398,6 +405,7 @@ public class ModifyTools
 
             destParent.AddProperty(clonedProp);
 
+            destImg.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new CopyResult
             {
                 Success = true,
@@ -442,6 +450,7 @@ public class ModifyTools
             var oldSize = $"{prop.PngProperty?.Width}x{prop.PngProperty?.Height}";
             prop.PngProperty.PNG = bitmap;
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -498,6 +507,7 @@ public class ModifyTools
                 oldValue = "(none)";
             }
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -565,6 +575,7 @@ public class ModifyTools
 
             parent.AddProperty(canvas);
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ImportResult
             {
                 Success = true,
@@ -629,6 +640,7 @@ public class ModifyTools
                 try { File.Delete(tempFile); } catch { }
             }
 
+            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ImportResult
             {
                 Success = true,
