@@ -452,8 +452,10 @@ public class ModifyTools
             var oldSize = $"{prop.PngProperty?.Width}x{prop.PngProperty?.Height}";
             (int declaredWidth, int declaredHeight) = WzImgMCP.Imaging.CanvasImaging.ReadAndCheckPngHeader(pngData);
             var surface = WzImgMCP.Imaging.CanvasImaging.ResolveReplacementFormat(format, prop.PngProperty, declaredWidth, declaredHeight, out var note);
-            prop.PngProperty ??= new WzPngProperty();
-            WzImgMCP.Imaging.CanvasImaging.SetCanvasFromPng(prop.PngProperty, pngData, surface, out var newWidth, out var newHeight);
+            // A canvas without a pixel property gets one only after the PNG was decoded and stored: a refused call changes nothing.
+            var pixelTarget = prop.PngProperty ?? new WzPngProperty();
+            WzImgMCP.Imaging.CanvasImaging.SetCanvasFromPng(pixelTarget, pngData, surface, out var newWidth, out var newHeight);
+            prop.PngProperty = pixelTarget;
 
             img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
