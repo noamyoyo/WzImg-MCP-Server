@@ -17,6 +17,14 @@ Licences, as found in the files of this repository (this is a statement of what 
                                                (Copyright (c) 2013, Esoteric Software)
   Other bundled or referenced components keep their own licences; check their files and NuGet package metadata.
 
+Image library added in the Linux fork (Phase 2), as declared in the NuGet package metadata
+  SkiaSharp                                    3.119.4   licence expression MIT, authors Microsoft,
+  SkiaSharp.NativeAssets.Linux.NoDependencies  3.119.4   copyright (c) Microsoft Corporation
+                                               The native package ships THIRD-PARTY-NOTICES.txt for the components built
+                                               into libSkiaSharp.so (it has sections for skia, HarfBuzz and libpng, among
+                                               others). The Docker image copies LICENSE.txt and THIRD-PARTY-NOTICES.txt to
+                                               /app/licenses/skiasharp/. The Windows build does not use these packages.
+
 The original copyright notices and licence files have not been changed or removed. No separate licence has been
 added for the modifications in this fork.
 

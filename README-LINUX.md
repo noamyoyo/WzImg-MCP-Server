@@ -5,7 +5,7 @@ This repository is a fork of [lastbattle/WzImg-MCP-Server](https://github.com/la
 [lastbattle/MapleLib](https://github.com/lastbattle/MapleLib) (branched from `22e32d13`), branch `linux-slim`.
 The fork adds a Linux build that runs in a container. See [NOTICE](NOTICE) for attribution and licences.
 
-Status: **Phase 1**. The Windows build and the Windows test suite were **not run** for any of this work
+Status: **Phase 2** (Phase 1 had no bitmap tools). The Windows build and the Windows test suite were **not run** for any of this work
 (see "What was not verified" below).
 
 ## What the Linux build is
@@ -15,33 +15,106 @@ Status: **Phase 1**. The Windows build and the Windows test suite were **not run
 - With it on, the projects target plain `net10.0`, drop WinForms, WPF, SharpDX and the Windows-only NAudio
   packages, and use MonoGame DesktopGL and System.Drawing.Common instead. Windows-only code is guarded by the
   `LINUX_BUILD` compile constant.
-- **No bitmap tools yet.** MapleLib decodes and encodes canvas bitmaps with System.Drawing (GDI+), which is not
-  present on Linux. These tools return a structured "not available on the Linux build yet" error:
-  `get_canvas_bitmap`, `get_animation_frames` (with `metadataOnly=false`), `validate_image`, `export_png`,
-  `export_all_images`, `batch_export_images`, `set_canvas_bitmap`, `import_png`. `resolve_canvas_link` keeps its
-  link information and reports the missing image data in `image_note`.
-- What does work: reading and editing properties and strings, `extract_to_img`, `pack_to_wz`, sound tools
-  (`import_sound` with MP3 reads the frame headers directly, because there is no ACM decoder on Linux), and
-  everything else that only needs the compressed canvas data.
+- **The bitmap tools work.** MapleLib decodes and encodes canvas bitmaps with System.Drawing (GDI+) on Windows. On
+  Linux there is no GDI+, so the Linux build uses MapleLib's own pixel decoders and encoders on raw BGRA32 buffers
+  (`WzPngProperty.GetPixelsBgra32` / `SetPixelsBgra32`, `WzCanvasProperty.GetLinkedPixelsBgra32`) and SkiaSharp
+  only for PNG/JPEG decoding, encoding and scaling. See "Images" below.
+- Everything else works as before: reading and editing properties and strings, `extract_to_img`, `pack_to_wz`, and the
+  sound tools (`import_sound` with MP3 reads the frame headers directly, because there is no ACM decoder on Linux).
+
+## Images
+
+Library (facts from the package metadata, not legal advice): **SkiaSharp 3.119.4** and
+**SkiaSharp.NativeAssets.Linux.NoDependencies 3.119.4**. Both packages declare `<license type="expression">MIT</license>`,
+authors "Microsoft", copyright "(c) Microsoft Corporation". The native package carries a `THIRD-PARTY-NOTICES.txt`
+that lists the native components built into `libSkiaSharp.so` (it has sections for skia, HarfBuzz and libpng, among
+others). The Docker image keeps both texts in `/app/licenses/skiasharp/`. "NoDependencies" means the native library
+needs no fontconfig or freetype, so the runtime image needs **no extra apt packages** (checked: the image is
+built from the unchanged `aspnet` base and the hardened container below decodes, scales and encodes images).
+The Windows build does not use SkiaSharp; it keeps System.Drawing. The only server code that touches an image library
+is `WzImgMCP/Imaging/CanvasImaging.cs` (`#if LINUX_BUILD`).
+
+Tools:
+
+| Tool | What it does on Linux |
+| --- | --- |
+| `view_canvas` (new) | Returns the canvas as an MCP **image content block** (`image/png`) plus a text block with the size, WZ pixel format, origin and a note when the image was scaled. `maxSize` (default and maximum 2048) caps the larger side: bigger images are scaled down (Skia linear filter) and the text says so. `_inlink` / `_outlink` are followed. Errors come back as `isError` results. |
+| `export_png` | Writes the full-size PNG to a file; the output path must be inside `WZIMG_ALLOWED_ROOT`. |
+| `export_all_images`, `batch_export_images` | PNG files (`batch_export_images` also writes JPEG with `format=jpg`: quality 90, 4:2:0, transparent areas blended on black). |
+| `get_canvas_bitmap`, `get_animation_frames` (`metadataOnly=false`), `resolve_canvas_link` | Base64 PNG in the text result, as on Windows. Use `view_canvas` to look at an image. |
+| `validate_image` | Decodes every canvas to check it. |
+| `import_png`, `set_canvas_bitmap` | Take the PNG as `base64Png` **or** `pngPath` (a file inside the allowed root); exactly one of the two. New optional `format`: `auto` (default), `bgra8888`, `bgra4444`, `bgra5551`, `bgr565`, `dxt3`, `dxt5`. |
+
+Limits on imported PNGs (all platforms; they are checked before anything is decoded): at most **4096 x 4096 pixels**
+and **20 MiB (20,971,520 bytes)** of PNG data, read from the PNG header; the base64 text length is checked before it
+is decoded; data without the PNG signature is refused; a header that disagrees with the decoder is refused. The
+largest accepted import decodes to 64 MiB of pixels. Images read from WZ files keep MapleLib's own limits (32768
+pixels per side, 256 MiB decoded). A refused call changes nothing. Paths go through `PathGuard`: a file outside
+`WZIMG_ALLOWED_ROOT` (also through `..` or a symbolic link) is refused with "path outside allowed root".
+
+WZ pixel formats (decode and encode are MapleLib's existing code, run on raw buffers; Format numbers are the WZ ones):
+
+| Format | Pixels | Decoded to BGRA32 | Encoder (lossy?) |
+| --- | --- | --- | --- |
+| 1 | BGRA4444 | nibble x 17 | keeps the high nibble of every channel (lossy) |
+| 2 | BGRA8888 | unchanged | exact, including colour under transparent pixels |
+| 257 | ARGB1555 | channel c -> (c << 3) or (c >> 2); alpha bit -> 0 or 255 | 5 bit channels, alpha = top bit of alpha (lossy) |
+| 513 | RGB565 | as above, 6 bit green (g << 2) or (g >> 4), alpha 255 | 5/6 bit channels, alpha dropped (lossy) |
+| 517 | one RGB565 value per 16x16 block | block colour filled in | only used when it loses nothing (see below) |
+| 3, 1026 | DXT3 | 4x4 blocks, 4 bit alpha | min/max colour box, 4 bit alpha (lossy) |
+| 2050 | DXT5 | 4x4 blocks, interpolated alpha | min/max colour box, interpolated alpha (lossy) |
+| 4098 | BC7 | decoded | not written by this code |
+
+How this was verified: the unit tests (`CanvasPixelFormatTests`) build raw payloads by hand for every format and compare
+with values worked out from the format definition (an independent reference DXT decoder is compared with
+the real decoder on 1.1 million pixel images, including the SIMD path and partial edge blocks; BC7 with a hand-built mode 6 block). Encoders
+are checked against the quantisation each format defines. On the real client files in the test set only Format 1, 2
+and 513 occur (Morph.wz, Etc.wz: all 1; Ui.wz: 1, 2 and 513; every one of the 22,381 canvases decodes, and re-encoding
+as BGRA8888 reproduces the pixels). Formats 257, 517, DXT3, DXT5 and BC7 were verified on synthetic data only.
+The 16-bit expansion rule was taken from GDI+'s documented conversion and from MapleLib's own `RGB565ToColor`;
+it was **not** compared against real GDI+ output (no GDI+ here).
+
+What to know about the formats:
+
+- `import_png` / `set_canvas_bitmap` with `format=auto` let MapleLib choose the WZ format from the image content
+  (as the Windows tools do). That can be a lossy format (4444, 565, 1555, DXT). Use `format=bgra8888` to keep every
+  channel exact.
+- MapleLib's 5/6 bit quantiser truncates (about `v * 31 / 255` rounded down) while the decoder expands by bit
+  replication, so decoding a 565 or 1555 canvas and encoding it again can darken a channel by one step each time.
+  This is upstream behaviour and was left as it is (a test pins it).
+- Upstream picked Format 517 (one pixel per 16x16 block) for every RGB565 image whose size is a multiple of 16, which
+  destroys any image that is not flat per block. The fork now uses 517 only when each block is a single colour
+  after quantisation, otherwise Format 513. This also changes the Windows build (see below).
+- DXT3 and DXT5 need a width and height that are multiples of 4; `format=dxt3` / `dxt5` on other sizes is refused with
+  a clear message. `format=auto` only picks DXT for sizes that fit.
+- A canvas that has an `_inlink` / `_outlink` child is displayed and exported from the link target. `set_canvas_bitmap`
+  writes the canvas's own pixel data, so such a canvas keeps showing the linked image until the link is removed.
+- PNG files written by Skia are not byte-identical to GDI+'s output, only pixel-identical. `view_canvas` scaling uses a
+  linear/mipmap filter (the Windows branch uses bicubic).
+- Code that still needs GDI+ and is not reachable from any MCP tool: the XML / PNG-folder serializers, the NX
+  exporter, the XML deserializer and the Spine texture loader in MapleLib.
 
 ## Build and run with Docker
 
 Build from the repository root (the submodule must be checked out):
 
 ```bash
-docker build -t wzimg-mcp:linux-test .
+docker build -t wzimg-mcp:linux-phase2 .
 ```
 
 Run (this is the command from the `Dockerfile` header; see it for the reasoning):
 
 ```bash
 docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
-  --memory 3g -u 1000:100 -v /path/to/wz-data:/data wzimg-mcp:linux-test --host 0.0.0.0
+  --memory 3g -u 1000:100 -v /path/to/wz-data:/data wzimg-mcp:linux-phase2 --host 0.0.0.0
 ```
 
 The server listens on port 13339 (streamable HTTP). Put the container on a private Docker network and reach
 it from other containers by name. Do not add `-p` unless you bind it to `127.0.0.1` only
 (for example `-p 127.0.0.1:13339:13339`).
+
+The image is built for the CPU of the build host (`linux-x64` or `linux-arm64`): the Dockerfile publishes with that
+runtime identifier so that only that CPU's native libraries (SkiaSharp, SDL, OpenAL) are copied.
 
 Without Docker: `dotnet build WzImgMCP.sln -p:LinuxBuild=true`, then run `WzImgMCP.dll --http --port 13339`.
 Tests: `dotnet test WzImgMCP.Tests -p:LinuxBuild=true`.
@@ -52,7 +125,7 @@ Tests: `dotnet test WzImgMCP.Tests -p:LinuxBuild=true`.
 | --- | --- |
 | `WZIMG_ALLOWED_ROOT` | When set, every path argument of the file, batch and export tools is resolved (symlinks followed) and must lie inside this directory, otherwise the call fails with "path outside allowed root". Relative paths are taken relative to the root. The image sets it to `/data`. When unset, paths are not restricted. |
 | `WZIMG_HOST` / `--host` | Address the HTTP transport binds to. The default is localhost. IPv6 literals are bracketed automatically. The image does **not** set it, so inside a container you must pass `--host 0.0.0.0` for other containers to reach the server. |
-| `WZIMG_TEST_WZ_PATH` | Tests only: a directory containing `String.wz` (GMS key, version 83). Tests that need real data skip when it is not set. |
+| `WZIMG_TEST_WZ_PATH` | Tests only: a directory containing `String.wz` (GMS key, version 83). The image tests on real canvases also use `Morph.wz`, `Ui.wz` and `Etc.wz` from the same directory when they are there. Tests that need real data skip when it is not set. |
 
 ## Security notes
 
@@ -120,14 +193,37 @@ MapleLib (`linux-slim`):
 11. **Case-insensitive category lookup** (`ImgFileSystemManager`). Category names given in any case are mapped to
     the real directory name on disk. This only changes behaviour on case-sensitive file systems.
 
+Phase 2 additions (these also apply to a Windows build and have not been tested on Windows):
+
+12. **Server: image import limits and new parameters.** `import_png` and `set_canvas_bitmap` take `base64Png` or the
+    new `pngPath`, plus the new `format`; `base64Png` is no longer required. The 4096 x 4096 / 20 MiB limits and the
+    path guard apply on Windows too. On Windows the decoding is still System.Drawing (with `format=auto`, the
+    same `PNG` setter as before). The export tools write the bytes of `Bitmap.Save(MemoryStream)` to the file
+    instead of letting `Save` open the file itself. `view_canvas` is a new tool.
+13. **Server:** the Phase 1 `PlatformSupport` class (the "not available on the Linux build" errors) was removed.
+14. **MapleLib: raw pixel API** (new members only) and the shared `BgraSurface` the encoders read from (a `Bitmap`
+    is still locked exactly as before on Windows).
+15. **MapleLib: Format 517** is only written when every 16x16 block is one colour (see "Images"). This changes which
+    format `Bitmap`-based edits choose on Windows for opaque images whose size is a multiple of 16.
+16. **Server: `batch_export_images` file names.** The file name of a canvas inside an image used the path of its
+    parent, so all frames of an animation (`walk/0`, `walk/1`, ...) were written to the same `walk.png` and overwrote
+    each other. The canvas name is now part of the file name (`walk_0.png`, `walk_1.png`).
+
 ## What was not verified
 
 - **The Windows build and the Windows test suite were not run.** All building and testing was done in the Linux
   container (`dotnet/sdk:10.0`).
-- Of the 76 tests, 29 fail on Linux with and without the fork changes: they share a test fixture
-  (`TestFixture`) that creates a `System.Drawing.Bitmap`, which needs `gdiplus.dll`. That is a limit of the
-  upstream tests on Linux, not a regression. The GDI+-free tests added by the fork (extraction, edit safety,
-  pack round trip, path guard, scan, backup location) pass when `WZIMG_TEST_WZ_PATH` points at a directory with
-  `String.wz`.
+- Windows image code: the Windows branches of `CanvasImaging` (System.Drawing) were only **compiled** (the file was
+  built without `LINUX_BUILD` against System.Drawing.Common), never run; the Windows build of the whole solution could
+  not be built here. The changes to MapleLib's encoders keep the same `LockBits` call on Windows but were not run
+  there.
+- Tests on Linux: 159 tests; with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
+  156 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
+  and Morph.wz 154 pass and 5 skip; without the variable 136 pass and 23 skip. All 29 upstream tests that failed in
+  Phase 1 (they share `TestFixture`, which created a `System.Drawing.Bitmap`) now pass, because the fixture uses the raw
+  pixel API under `LINUX_BUILD`. Two Phase 1 tests (`PlatformSupportTests`) were deleted with the stub they tested.
+  The upstream test `ModifyToolsTests.CanvasAndPersistenceOps_Work` accepts an error from `set_canvas_bitmap`, and its
+  1x1 PNG has wrong checksums (bad IDAT CRC, zlib stream without Adler-32) that libpng rejects, so that test no longer
+  proves the image path; `CanvasImagingTests` covers it with a valid PNG and a strict assertion.
 - The packer's multi-IV fallback and the Lua IV preference were checked with `String.wz` (GMS) and mixed-key
   trees; the Lua preference has not been exercised against a real Lua data set.
