@@ -89,7 +89,7 @@ What to know about the formats:
   destroys any image that is not flat per block. The fork now uses 517 only when each block is a single colour
   after quantisation, otherwise Format 513. This also changes the Windows build (see below).
 - DXT3 and DXT5 need a width and height that are multiples of 4; `format=dxt3` / `dxt5` on other sizes is refused with
-  a clear message. `format=auto` only picks DXT for sizes that fit.
+  a clear message. `format=auto` never picks DXT (see `WZIMG_PRE_BIG_BANG`).
 - A canvas that has an `_inlink` / `_outlink` child is displayed and exported from the link target. `set_canvas_bitmap`
   writes the canvas's own pixel data, so such a canvas keeps showing the linked image until the link is removed.
 - PNG files written by Skia are not byte-identical to GDI+'s output, only pixel-identical. `view_canvas` scaling uses a
@@ -127,6 +127,7 @@ Tests: `dotnet test WzImgMCP.Tests -p:LinuxBuild=true`.
 | Name | Meaning |
 | --- | --- |
 | `WZIMG_ALLOWED_ROOT` | When set, every path argument of the file, batch and export tools is resolved (symlinks followed) and must lie inside this directory, otherwise the call fails with "path outside allowed root". Relative paths are taken relative to the root. The image sets it to `/data`. When unset, paths are not restricted. |
+| `WZIMG_PRE_BIG_BANG` | `1` (default) or `0`. A v83 client is a pre Big Bang client and cannot read DXT images, so with `1` MapleLib's automatic format choice (`ImageFormatDetector`) never returns DXT3 or DXT5. `import_png` and `set_canvas_bitmap` do not use that automatic choice at all (`format=auto` means lossless `bgra8888`); the switch matters for code paths that still let MapleLib choose, and DXT stays available when you ask for it with `format=dxt3` / `dxt5`. Set `0` only for a post Big Bang client. |
 | `WZIMG_HOST` / `--host` | Address the HTTP transport binds to. The default is localhost. IPv6 literals are bracketed automatically. The image does **not** set it, so inside a container you must pass `--host 0.0.0.0` for other containers to reach the server. |
 | `WZIMG_TEST_WZ_PATH` | Tests only: a directory containing `String.wz` (GMS key, version 83). The image tests on real canvases also use `Morph.wz`, `Ui.wz` and `Etc.wz` from the same directory when they are there. Tests that need real data skip when it is not set. |
 

@@ -14,6 +14,8 @@ class Program
 {
     static async Task Main(string[] args)
     {
+        ServerSettings.Apply();   // WZIMG_PRE_BIG_BANG: no DXT in the automatic format choice
+
         // Parse transport mode from arguments
         var transport = ParseTransportMode(args);
         var port = ParsePort(args);

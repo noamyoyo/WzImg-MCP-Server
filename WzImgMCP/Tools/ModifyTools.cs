@@ -430,7 +430,7 @@ public class ModifyTools
         [Description("Property path to the canvas")] string path,
         [Description("Base64 encoded PNG data (give this or pngPath)")] string? base64Png = null,
         [Description("Path of a PNG file inside the allowed root (give this or base64Png)")] string? pngPath = null,
-        [Description("Optional WZ pixel format: bgra8888 (exact), bgra4444, bgra5551, bgr565, dxt3, dxt5, or auto (= bgra8888). Default: the canvas keeps its current format")] string? format = null)
+        [Description("Optional WZ pixel format: bgra8888 (exact), bgra4444, bgra5551, bgr565, dxt3, dxt5, or auto (= lossless bgra8888, never DXT). Default: the canvas keeps its current format")] string? format = null)
     {
         if (!_session.IsInitialized)
         {
@@ -538,7 +538,7 @@ public class ModifyTools
         [Description("Origin X (optional)")] int? originX = null,
         [Description("Origin Y (optional)")] int? originY = null,
         [Description("Path of a PNG file inside the allowed root (give this or base64Png)")] string? pngPath = null,
-        [Description("Optional WZ pixel format: bgra8888 (exact, default), bgra4444, bgra5551, bgr565, dxt3, dxt5, or auto (= bgra8888)")] string? format = null)
+        [Description("Optional WZ pixel format: bgra8888 (exact, default), bgra4444, bgra5551, bgr565, dxt3, dxt5, or auto (= lossless bgra8888, never DXT). Lossy formats only when named here")] string? format = null)
     {
         if (!_session.IsInitialized)
         {

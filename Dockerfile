@@ -18,6 +18,10 @@
 # (WZIMG_ALLOWED_ROOT). Keep extracted trees in a sub-directory of /data (e.g. /data/v83): when the
 # allowed root is set, edit backups are written to a Backups directory inside the extracted tree
 # (/data/v83/Backups), which category listing and packing skip.
+#
+# WZIMG_PRE_BIG_BANG (default 1, set 0 to change): the target client is a pre Big Bang client, which cannot
+# read DXT images, so MapleLib's automatic pixel format choice never returns DXT. import_png and
+# set_canvas_bitmap with format=auto store lossless bgra8888; DXT and the 16 bit formats stay available on request.
 
 # Base images are pinned by digest. Tag at the time of pinning: mcr.microsoft.com/dotnet/sdk:10.0 and
 # mcr.microsoft.com/dotnet/aspnet:10.0. To update, pull the new tag and replace the digest.
@@ -37,6 +41,7 @@ COPY --from=build /out/ ./
 RUN mkdir /data && chown 1000:100 /data
 
 ENV WZIMG_ALLOWED_ROOT=/data \
+    WZIMG_PRE_BIG_BANG=1 \
     HOME=/tmp \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_EnableDiagnostics=0
