@@ -47,6 +47,10 @@ public sealed class ViewerOptions
     public const string MaxChangesEnvVar = "WZ_VIEWER_MAX_CHANGES";
     public const string MaxCanvasDecodesEnvVar = "WZ_VIEWER_MAX_CANVAS_DECODES";
     public const string DiffBudgetSecondsEnvVar = "WZ_VIEWER_DIFF_BUDGET_SECONDS";
+    public const string MaxDecodedMbEnvVar = "WZ_VIEWER_MAX_DECODED_MB";
+    public const string MaxDiffResponseKbEnvVar = "WZ_VIEWER_MAX_DIFF_RESPONSE_KB";
+    public const int DefaultMaxDecodedMb = 256;
+    public const int DefaultMaxDiffResponseKb = 4096;
     public const int DefaultMaxChanges = 2000;
     public const int DefaultMaxCanvasDecodes = 200;
     public const int DefaultDiffBudgetSeconds = 25;
@@ -56,6 +60,12 @@ public sealed class ViewerOptions
 
     /// <summary>Most canvas pairs one diff decodes to pixels; further differing pairs are reported as <c>pixels_unverified</c>.</summary>
     public int MaxCanvasDecodes { get; init; } = DefaultMaxCanvasDecodes;
+
+    /// <summary>Most bytes of decoded pixels (width x height x 4, both sides of every pair) one diff may decode; further pairs are <c>pixels_unverified</c>.</summary>
+    public long MaxDecodedBytes { get; init; } = DefaultMaxDecodedMb * 1024L * 1024L;
+
+    /// <summary>Upper bound for the JSON a diff lists (paths, values, names); more sets <c>truncated</c> with a warning.</summary>
+    public long MaxDiffResponseBytes { get; init; } = DefaultMaxDiffResponseKb * 1024L;
 
     /// <summary>Wall-clock time a diff may spend comparing before it stops and returns what it has, flagged as truncated.</summary>
     public TimeSpan DiffBudget { get; init; } = TimeSpan.FromSeconds(DefaultDiffBudgetSeconds);
@@ -117,6 +127,8 @@ public sealed class ViewerOptions
             LinkBudgetBytes = ParseWhole(getEnv(LinkBudgetMbEnvVar), DefaultLinkBudgetMb, 0, 1024) * 1024L * 1024L,
             MaxChanges = (int)ParseWhole(getEnv(MaxChangesEnvVar), DefaultMaxChanges, 1, 100000),
             MaxCanvasDecodes = (int)ParseWhole(getEnv(MaxCanvasDecodesEnvVar), DefaultMaxCanvasDecodes, 0, 100000),
+            MaxDecodedBytes = ParseWhole(getEnv(MaxDecodedMbEnvVar), DefaultMaxDecodedMb, 1, 16384) * 1024L * 1024L,
+            MaxDiffResponseBytes = ParseWhole(getEnv(MaxDiffResponseKbEnvVar), DefaultMaxDiffResponseKb, 16, 262144) * 1024L,
             DiffBudget = TimeSpan.FromSeconds(ParseWhole(getEnv(DiffBudgetSecondsEnvVar), DefaultDiffBudgetSeconds, 1, 600)),
         };
     }

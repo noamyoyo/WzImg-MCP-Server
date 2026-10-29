@@ -397,16 +397,19 @@ public sealed class ViewerDiffEngineTests : IDisposable
     }
 
     [Fact]
-    public void Canvas_OnlyColourOfTransparentPixelsDiffers_IsRecompressed_NotAChange()
+    public void Canvas_OnlyColourOfTransparentPixelsDiffers_IsHiddenColour_NotAVisibleChange()
     {
         // alpha 0 everywhere in the left half; the colour hidden there differs, the visible half is the same
         Func<byte, Func<int, int, (byte, byte, byte, byte)>> make = hidden => (x, y) => x < 4 ? (hidden, hidden, hidden, (byte)0) : ((byte)90, (byte)90, (byte)90, (byte)255);
         var r = Diff(img => img.AddProperty(ImgFixture.PixelCanvas("c", 8, 8, make(7))), img => img.AddProperty(ImgFixture.PixelCanvas("c", 8, 8, make(99))));
         Assert.Empty(r.Changes);
         var canvas = Assert.Single(r.Canvases);
-        Assert.Equal("recompressed", canvas.Change);
-        Assert.Equal(1, r.Summary.CanvasesRecompressed);
+        Assert.Equal("hidden_color", canvas.Change);
+        Assert.Equal(0, r.Summary.CanvasesRecompressed);
+        Assert.Equal(1, r.Summary.CanvasesHiddenColour);
         Assert.Equal(0, r.Summary.CanvasesChanged);
+        Assert.Equal("identical_visible", r.Semantic);   // F10: not a plain "identical"
+        Assert.Contains(r.Warnings, w => w.Contains("hidden_color"));
     }
 
     [Fact]
@@ -500,6 +503,363 @@ public sealed class ViewerDiffEngineTests : IDisposable
                      new DiffOptions { MaxCanvasDecodes = 0 });
         Assert.Empty(r.Changes);
         Assert.Empty(r.Warnings);
+    }
+
+    // ---- review findings
+
+    private static WzImage MemoryImage(Action<WzImage> fill)
+    {
+        var img = new WzImage("mem.img") { Changed = true };
+        fill(img);
+        return img;
+    }
+
+    private static ImageDiffResult DiffMemory(Action<WzImage> oldImage, Action<WzImage> newImage, DiffOptions? options = null)
+    {
+        var a = new LoadedImage(new ImageKey("canon", "mem.img", 1, 1), MemoryImage(oldImage), "BMS", 0, 1, 1, "a");
+        var b = new LoadedImage(new ImageKey("owner", "mem.img", 1, 1), MemoryImage(newImage), "BMS", 0, 1, 1, "b");
+        return ImageDiffer.Diff(a, b, options ?? new DiffOptions(), CancellationToken.None);
+    }
+
+    private static WzSubProperty Anim(string name, int frames, byte shade = 10)
+    {
+        var s = new WzSubProperty(name);
+        for (int i = 0; i < frames; i++) s.AddProperty(ImgFixture.PixelCanvas(i.ToString(), 4, 4, Solid((byte)(shade + i))));
+        return s;
+    }
+
+    // F3
+
+    [Fact]
+    public void F3_SubReplacedByString_ListsTheRemovedCanvases_AndCountsThem()
+    {
+        var r = Diff(img => img.AddProperty(Anim("stand", 3)), img => img.AddProperty(new WzStringProperty("stand", "gone")));
+        Assert.Equal("type", Only(r).Detail);
+        Assert.Equal(new[] { ("stand/0", "removed"), ("stand/1", "removed"), ("stand/2", "removed") }, r.Canvases.Select(c => (c.Path, c.Change)));
+        Assert.Equal(3, r.Summary.CanvasesChanged);
+        Assert.NotNull(r.Canvases[0].Before);
+        Assert.Null(r.Canvases[0].After);
+    }
+
+    [Fact]
+    public void F3_StringReplacedBySub_ListsTheAddedCanvases()
+    {
+        var r = Diff(img => img.AddProperty(new WzStringProperty("stand", "x")), img => img.AddProperty(Anim("stand", 2)));
+        Assert.Equal(new[] { ("stand/0", "added"), ("stand/1", "added") }, r.Canvases.Select(c => (c.Path, c.Change)));
+        Assert.Equal(2, r.Summary.CanvasesChanged);
+    }
+
+    [Fact]
+    public void F3_CanvasReplacedByInt_AndSubReplacedByCanvas()
+    {
+        var a = Diff(img => img.AddProperty(ImgFixture.PixelCanvas("c", 4, 4, Solid(10))), img => img.AddProperty(new WzIntProperty("c", 1)));
+        Assert.Equal(("c", "removed"), (a.Canvases.Single().Path, a.Canvases.Single().Change));
+
+        var b = Diff(img => img.AddProperty(Anim("c", 2)), img => img.AddProperty(ImgFixture.PixelCanvas("c", 4, 4, Solid(10))));
+        Assert.Equal(new[] { ("c", "added"), ("c/0", "removed"), ("c/1", "removed") }, b.Canvases.Select(c => (c.Path, c.Change)));
+        Assert.Equal(3, b.Summary.CanvasesChanged);
+    }
+
+    // F4
+
+    [Fact]
+    public void F4_Sound_SameDataOtherWaveFormat_IsAChange()
+    {
+        var dir = Directory.CreateTempSubdirectory("viewer-wav-").FullName;
+        try
+        {
+            var r = Diff(
+                img => img.AddProperty(ImgFixture.Sound("a", dir, 10, sampleRate: 8000)),
+                img => img.AddProperty(ImgFixture.Sound("a", dir, 10, sampleRate: 22050)));   // identical sample bytes, another sample rate
+            var c = Only(r);
+            Assert.Equal(("a", "sound"), (c.Path, c.Type));
+            Assert.NotEqual(c.Before, c.After);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void F4_Video_BytesAreCompared()
+    {
+        var same = Diff(img => img.AddProperty(new WzVideoProperty("v", 1, new byte[] { 1, 2, 3, 4 })), img => img.AddProperty(new WzVideoProperty("v", 1, new byte[] { 1, 2, 3, 4 })));
+        Assert.Empty(same.Changes);
+
+        var bytes = Diff(img => img.AddProperty(new WzVideoProperty("v", 1, new byte[] { 1, 2, 3, 4 })), img => img.AddProperty(new WzVideoProperty("v", 1, new byte[] { 1, 2, 3, 5 })));
+        var c = Only(bytes);
+        Assert.Equal(("v", "video"), (c.Path, c.Type));
+        Assert.StartsWith("video ", c.Before);
+        Assert.NotEqual(c.Before, c.After);
+
+        var kind = Diff(img => img.AddProperty(new WzVideoProperty("v", 1, new byte[] { 1, 2, 3, 4 })), img => img.AddProperty(new WzVideoProperty("v", 2, new byte[] { 1, 2, 3, 4 })));
+        Assert.Equal("v", Only(kind).Path);
+    }
+
+    private static WzConvexProperty Convex(string name, params WzImageProperty[] children)
+    {
+        var c = new WzConvexProperty(name);
+        foreach (var child in children) c.AddProperty(child);
+        return c;
+    }
+
+    [Fact]
+    public void F4_Convex_NonVectorAndExtraChildrenAreVisible()
+    {
+        var baseline = Convex("hull", new WzVectorProperty("0", 1, 2), new WzVectorProperty("1", 3, 4));
+
+        var same = Diff(img => img.AddProperty(baseline.DeepClone()), img => img.AddProperty(Convex("hull", new WzVectorProperty("0", 1, 2), new WzVectorProperty("1", 3, 4))));
+        Assert.Empty(same.Changes);
+
+        var extra = Diff(img => img.AddProperty(baseline.DeepClone()),
+            img => img.AddProperty(Convex("hull", new WzVectorProperty("0", 1, 2), new WzVectorProperty("1", 3, 4), new WzSubProperty("2"))));
+        Assert.Equal("hull", Only(extra).Path);
+        Assert.Equal("[(1, 2) (3, 4) hull:sub]", Only(extra).After);   // the file format names every convex child after the convex itself
+
+        WzSubProperty WithInt(int v) { var sub = new WzSubProperty("1"); sub.AddProperty(new WzIntProperty("x", v)); return sub; }
+        var nonVector = Diff(img => img.AddProperty(Convex("hull", new WzVectorProperty("0", 1, 2), WithInt(5))),
+            img => img.AddProperty(Convex("hull", new WzVectorProperty("0", 1, 2), WithInt(6))));
+        Assert.Equal("hull", Only(nonVector).Path);   // a non-vector child changed below: invisible before
+
+        var order = Diff(img => img.AddProperty(baseline.DeepClone()), img => img.AddProperty(Convex("hull", new WzVectorProperty("0", 3, 4), new WzVectorProperty("1", 1, 2))));
+        Assert.Equal("hull", Only(order).Path);
+    }
+
+    // F6
+
+    [Fact]
+    public void F6_LongNamesAndPaths_AreCut_AndFlagged()
+    {
+        var longName = new string('n', 500);
+        var r = Diff(img => img.AddProperty(new WzIntProperty(longName, 1)), img => img.AddProperty(new WzIntProperty(longName, 2)));
+        var c = Only(r);
+        Assert.Equal(DiffOptions.MaxNameChars, c.Path.Length);
+        Assert.True(c.PathTruncated);
+
+        // a subtree with long child names: the list of names is cut too
+        var added = Diff(img => { }, img =>
+        {
+            var s = new WzSubProperty("s");
+            s.AddProperty(new WzIntProperty(new string('k', 400), 1));
+            img.AddProperty(s);
+        });
+        var change = Only(added);
+        Assert.All(change.Children!, n => Assert.True(n.Length <= DiffOptions.MaxNameChars));
+        Assert.Null(change.PathTruncated);
+
+        // a deep path of long names is cut as a whole
+        Action<WzImage> deepWith(int leaf) => img =>
+        {
+            var top = new WzSubProperty(new string('a', 90));
+            var parent = top;
+            for (int i = 0; i < 30; i++)
+            {
+                var child = new WzSubProperty(new string((char)('b' + i % 20), 90));
+                parent.AddProperty(child);
+                parent = child;
+            }
+            parent.AddProperty(new WzIntProperty("leaf", leaf));
+            img.AddProperty(top);
+        };
+        var deep = DiffMemory(deepWith(1), deepWith(2));
+        var leaf = Assert.Single(deep.Changes);
+        Assert.Equal(DiffOptions.MaxPathChars, leaf.Path.Length);
+        Assert.True(leaf.PathTruncated);
+    }
+
+    [Fact]
+    public void F6_ResponseSizeCap_CutsTheList_AndFlagsIt()
+    {
+        var options = new DiffOptions { MaxResponseBytes = 4000 };
+        var r = Diff(img => { }, img => { for (int i = 0; i < 200; i++) img.AddProperty(new WzStringProperty($"name{i:000}", new string('v', 150))); }, options);
+        Assert.True(r.Truncated);
+        Assert.InRange(r.Changes.Count, 1, 199);
+        Assert.Contains(r.Warnings, w => w.Contains("response size limit"));
+        var json = JsonSerializer.Serialize(r, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.True(json.Length < options.MaxResponseBytes, $"{json.Length} bytes against a cap of {options.MaxResponseBytes}");
+    }
+
+    [Fact]
+    public void F6_SizeEstimate_IsAnUpperBound_ForNonAsciiText()
+    {
+        var options = new DiffOptions { MaxResponseBytes = 20000 };
+        var r = Diff(img => { }, img => { for (int i = 0; i < 300; i++) img.AddProperty(new WzStringProperty($"\u540d{i:000}", new string('\u5b57', 150))); }, options);
+        Assert.True(r.Truncated);
+        var json = JsonSerializer.Serialize(r, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.True(json.Length < options.MaxResponseBytes, $"{json.Length} bytes against a cap of {options.MaxResponseBytes}");
+    }
+
+    // F7
+
+    [Fact]
+    public void F7_LoneSurrogates_AreReplaced_SoTheResultCanBeSerialised()
+    {
+        var bad = "x\uD800y";   // a lone high surrogate
+        var r = DiffMemory(
+            img => { img.AddProperty(new WzStringProperty("v" + bad, bad + "1")); img.AddProperty(new WzIntProperty("k\uDC00", 1)); },
+            img => { img.AddProperty(new WzStringProperty("v" + bad, bad + "2")); img.AddProperty(new WzIntProperty("k\uDC00", 2));
+                     var s = new WzSubProperty("s\uD800"); s.AddProperty(new WzIntProperty("c\uD801", 1)); img.AddProperty(s); });
+        Assert.NotEmpty(r.Changes);
+        var json = JsonSerializer.Serialize(r, new JsonSerializerOptions(JsonSerializerDefaults.Web));   // threw before the fix
+        Assert.DoesNotContain("\\ud800", json, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(r.Changes, c => c.Path == "v" + "x\uFFFDy" && c.Before == "x\uFFFDy1");
+        Assert.Contains(r.Changes, c => c.Path == "k\uFFFD");
+        Assert.Contains(r.Changes, c => c.Path == "s\uFFFD" && c.Children!.Contains("c\uFFFD"));
+    }
+
+    [Fact]
+    public void F7_Clean()
+    {
+        // built in code: a lone surrogate cannot survive in an attribute argument (the metadata is UTF-8)
+        var cases = new (string Input, string Expected)[]
+        {
+            ("plain", "plain"),
+            ("a\uD800b", "a\uFFFDb"),
+            ("a\uDC00b", "a\uFFFDb"),
+            ("\uD800", "\uFFFD"),
+            ("\uD83D\uDE00", "\uD83D\uDE00"),   // a valid pair is kept
+            ("\uDE00\uD83D", "\uFFFD\uFFFD"),   // reversed
+        };
+        foreach (var (input, expected) in cases)
+            Assert.Equal(expected, PropertyValues.Clean(input));
+    }
+
+    [Fact]
+    public void F7_Cut_NeverLeavesALoneSurrogateAtTheEnd()
+    {
+        var text = new string('a', DiffOptions.MaxValueChars - 1) + "\uD83D\uDE00tail";
+        var (cut, truncated) = PropertyValues.Cut(text);
+        Assert.True(truncated);
+        Assert.Equal(DiffOptions.MaxValueChars - 1, cut!.Length);
+        JsonSerializer.Serialize(cut);
+    }
+
+    // F8
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(EndOfStreamException))]
+    [InlineData(typeof(IndexOutOfRangeException))]
+    [InlineData(typeof(InvalidOperationException))]
+    [InlineData(typeof(InvalidDataException))]
+    public void F8_ReadFailureOfOneCanvas_IsPixelsUnverified_NotAFailedDiff(Type exception)
+    {
+        Action<string> boom = where => { if (where == "stage1") throw (Exception)Activator.CreateInstance(exception)!; };
+        var r = Diff(img => img.AddProperty(ImgFixture.PixelCanvas("c", 8, 8, Solid(10))), img => img.AddProperty(ImgFixture.PixelCanvas("c", 8, 8, Solid(200))),
+            new DiffOptions { Probe = boom });
+        var c = Only(r);
+        Assert.Equal("pixels_unverified", c.Detail);
+        Assert.Contains(r.Warnings, w => w.Contains("could not be verified"));
+        Assert.Equal("different", r.Semantic);
+    }
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(IndexOutOfRangeException))]
+    [InlineData(typeof(InvalidOperationException))]
+    public void F8_ReadFailureWhileDecoding_IsPixelsUnverified(Type exception)
+    {
+        Action<string> boom = where => { if (where == "decode") throw (Exception)Activator.CreateInstance(exception)!; };
+        var r = Diff(img => img.AddProperty(ImgFixture.PixelCanvas("c", 8, 8, Solid(10))), img => img.AddProperty(ImgFixture.PixelCanvas("c", 8, 8, Solid(200))),
+            new DiffOptions { Probe = boom });
+        Assert.Equal("pixels_unverified", Only(r).Detail);
+    }
+
+    [Fact]
+    public void F8_ReadFailureOfASoundValue_IsAnUnverifiedChange_AndTheRestIsStillCompared()
+    {
+        var dir = Directory.CreateTempSubdirectory("viewer-wav-").FullName;
+        try
+        {
+            Action<string> boom = where => { if (where == "value") throw new EndOfStreamException(); };
+            var r = Diff(
+                img => { img.AddProperty(ImgFixture.Sound("a", dir, 10)); img.AddProperty(new WzIntProperty("n", 1)); },
+                img => { img.AddProperty(ImgFixture.Sound("a", dir, 10)); img.AddProperty(new WzIntProperty("n", 2)); },
+                new DiffOptions { Probe = boom });
+            // the probe fires for every value; both nodes are reported as unverified, the diff itself completes
+            Assert.All(r.Changes, c => Assert.Equal("unverified", c.Detail));
+            Assert.Contains(r.Changes, c => c.Path == "a");
+            Assert.Contains(r.Warnings, w => w.Contains("could not be read"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void F8_OutOfMemory_IsNotSwallowedByTheDiffer()
+    {
+        Action<string> boom = _ => throw new OutOfMemoryException();
+        Assert.Throws<OutOfMemoryException>(() => Diff(
+            img => img.AddProperty(ImgFixture.PixelCanvas("c", 8, 8, Solid(10))), img => img.AddProperty(ImgFixture.PixelCanvas("c", 8, 8, Solid(200))),
+            new DiffOptions { Probe = boom }));
+    }
+
+    // F9
+
+    [Fact]
+    public void F9_DecodedBytesBudget_StopsFurtherDecodes()
+    {
+        Func<byte, Action<WzImage>> fill = shade => img => { for (int i = 0; i < 4; i++) img.AddProperty(ImgFixture.PixelCanvas($"c{i}", 8, 8, Solid((byte)(shade + i)))); };
+        // each 8x8 pair costs 2 x 256 bytes; room for two pairs
+        var r = Diff(fill(10), fill(100), new DiffOptions { MaxDecodedBytes = 2 * 2 * 8 * 8 * 4 });
+        Assert.Equal(new[] { "pixels", "pixels", "pixels_unverified", "pixels_unverified" }, r.Changes.Select(c => c.Detail));
+        Assert.Contains(r.Warnings, w => w.Contains("decoded-bytes budget"));
+        Assert.Equal("different", r.Semantic);
+    }
+
+    [Fact]
+    public void F9_DiffCanvasCap_IsBelowThePictureEndpointCap()
+        => Assert.True(DiffOptions.MaxDiffCanvasDecodedBytes < DiffOptions.MaxCanvasDecodedBytes);
+
+    // F10
+
+    private static WzCanvasProperty Recompress(WzCanvasProperty source)
+    {
+        var png = source.PngProperty!;
+        var zipped = png.GetCompressedBytes(true)!;
+        using var inflated = new MemoryStream();
+        using (var input = new System.IO.Compression.ZLibStream(new MemoryStream(zipped), System.IO.Compression.CompressionMode.Decompress))
+            input.CopyTo(inflated);
+        using var output = new MemoryStream();
+        using (var z = new System.IO.Compression.ZLibStream(output, System.IO.Compression.CompressionLevel.NoCompression, leaveOpen: true))
+            z.Write(inflated.ToArray());
+        var copy = new WzCanvasProperty(source.Name) { PngProperty = new WzPngProperty() };
+        copy.PngProperty.SetCompressedBytes(output.ToArray(), png.Width, png.Height, png.Format);
+        foreach (var child in source.WzProperties) copy.AddProperty(child.DeepClone());
+        return copy;
+    }
+
+    [Fact]
+    public void F10_ReallyRecompressed_SamePixelsOtherBytes_IsIdentical()
+    {
+        var original = ImgFixture.PixelCanvas("c", 16, 16, (x, y) => ((byte)(x * 9), (byte)(y * 7), (byte)(x ^ y), (byte)255));
+        var r = Diff(img => img.AddProperty(original.DeepClone()), img => img.AddProperty(Recompress(original)));
+        Assert.Empty(r.Changes);
+        var canvas = Assert.Single(r.Canvases);
+        Assert.Equal("recompressed", canvas.Change);
+        Assert.Equal(1, r.Summary.CanvasesRecompressed);
+        Assert.Equal("identical", r.Semantic);
+    }
+
+    [Fact]
+    public void F10_LinkedCanvases_CompareEqualByTextOnly_AreIdenticalVisibleWithAWarning()
+    {
+        WzCanvasProperty Linked()
+        {
+            var c = ImgFixture.PixelCanvas("c", 8, 8, Solid(10));
+            c.AddProperty(new WzStringProperty("_outlink", "Mob/A.img/1"));
+            return c;
+        }
+        var r = Diff(img => img.AddProperty(Linked()), img => img.AddProperty(Linked()));
+        Assert.Empty(r.Changes);
+        Assert.Equal("identical_visible", r.Semantic);
+        Assert.Contains(r.Warnings, w => w.Contains("linked canvas"));
+    }
+
+    [Fact]
+    public void F10_TheRule()
+    {
+        Assert.Equal("identical", Diff(img => img.AddProperty(new WzIntProperty("a", 1)), img => img.AddProperty(new WzIntProperty("a", 1))).Semantic);
+        Assert.Equal("different", Diff(img => img.AddProperty(new WzIntProperty("a", 1)), img => img.AddProperty(new WzIntProperty("a", 2))).Semantic);
+        var truncated = Diff(img => { }, img => { for (int i = 0; i < 5; i++) img.AddProperty(new WzIntProperty($"n{i}", i)); }, new DiffOptions { MaxChanges = 2 });
+        Assert.Equal("different", truncated.Semantic);
     }
 }
 #endif

@@ -31,14 +31,20 @@ public sealed record DiffResponse(
 
 /// <summary>
 /// Diffs a person's copy of one image against the canon copy. States: <c>unchanged</c> (same bytes), <c>changed</c>,
-/// <c>added</c> (only the person has it), <c>removed</c> (only canon has it). Semantic: <c>identical</c> when the bytes
-/// differ but nothing visible does ("re-saved"), else <c>different</c>.
+/// <c>added</c> (only the person has it), <c>removed</c> (only canon has it). Semantic:
+/// <list type="bullet">
+/// <item><c>identical</c>: the bytes are equal, or every value, every picture (to the last pixel) and every link text is equal ("re-saved");</item>
+/// <item><c>identical_visible</c>: nothing is listed and nothing visible differs, BUT a caveat applies: the colour under fully
+/// transparent pixels differs (<c>hidden_color</c> in <c>canvases</c>), or linked canvases (_inlink/_outlink) were compared by
+/// their link text only. Carries warnings; the panel must not show it as a plain "identical" tick;</item>
+/// <item><c>different</c>: anything is listed, or the list is cut.</item>
+/// </list>
 /// </summary>
 public sealed class ViewerDiffService
 {
     private readonly ViewerImageLoader _loader;
     private readonly ViewerBaseMap _bases;
-    private readonly DiffOptions _options;
+    private DiffOptions _options;
 
     public ViewerDiffService(ViewerImageLoader loader, ViewerBaseMap bases, ViewerOptions options)
     {
@@ -46,6 +52,9 @@ public sealed class ViewerDiffService
         _bases = bases;
         _options = DiffOptions.From(options);
     }
+
+    /// <summary>Test seam, see <see cref="DiffOptions.Probe"/>.</summary>
+    public Action<string>? Probe { set => _options = _options with { Probe = value }; }
 
     /// <summary>Synchronous; run it through <see cref="ViewerWorkRunner"/>. A null side means the file does not exist there.</summary>
     public DiffResponse Diff(string person, ResolvedImage? canon, ResolvedImage? mine, CancellationToken cancellationToken)
@@ -73,9 +82,17 @@ public sealed class ViewerDiffService
                 return new DiffResponse("unchanged", "identical", before, now, new DiffSummary(0, 0, 0, 0, 0),
                     Array.Empty<DiffChange>(), Array.Empty<CanvasChange>(), false, Array.Empty<string>());
 
-            var result = ImageDiffer.Diff(oldLease.Loaded, newLease.Loaded, _options, cancellationToken);
-            var semantic = result.Changes.Count == 0 && !result.Truncated ? "identical" : "different";
-            return new DiffResponse("changed", semantic, before, now, result.Summary, result.Changes, result.Canvases, result.Truncated, result.Warnings);
+            ImageDiffResult result;
+            try
+            {
+                result = ImageDiffer.Diff(oldLease.Loaded, newLease.Loaded, _options, cancellationToken);
+            }
+            catch (OutOfMemoryException)   // also InsufficientMemoryException
+            {
+                _loader.Cache.Clear();   // give memory back before the next request, like the loader does
+                throw new ViewerApiException(413, "too_large", "the image needs more memory than the viewer allows");
+            }
+            return new DiffResponse("changed", result.Semantic, before, now, result.Summary, result.Changes, result.Canvases, result.Truncated, result.Warnings);
         }
         finally
         {

@@ -91,15 +91,15 @@ internal static class ImgFixture
     }
 
     /// <summary>A tiny PCM WAV file, and a sound property made from it (the library keeps the file bytes).</summary>
-    public static WzBinaryProperty Sound(string name, string directory, byte tone)
+    public static WzBinaryProperty Sound(string name, string directory, byte tone, int sampleRate = 8000)
     {
         var data = new byte[3200];
         for (int i = 0; i < data.Length; i++) data[i] = (byte)(tone + i % 7);
-        var path = Path.Combine(directory, $"tone-{tone}.wav");
+        var path = Path.Combine(directory, $"tone-{tone}-{sampleRate}.wav");
         using (var w = new BinaryWriter(File.Create(path)))
         {
             w.Write("RIFF"u8.ToArray()); w.Write(36 + data.Length); w.Write("WAVE"u8.ToArray());
-            w.Write("fmt "u8.ToArray()); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(8000); w.Write(16000); w.Write((short)2); w.Write((short)16);
+            w.Write("fmt "u8.ToArray()); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(sampleRate); w.Write(sampleRate * 2); w.Write((short)2); w.Write((short)16);
             w.Write("data"u8.ToArray()); w.Write(data.Length); w.Write(data);
         }
         return new WzBinaryProperty(name, path);

@@ -55,24 +55,62 @@ public static class PropertyValues
             WzDoubleProperty d => d.Value.ToString("R", CultureInfo.InvariantCulture),
             WzVectorProperty v => $"({v.X?.Value ?? 0}, {v.Y?.Value ?? 0})",
             WzUOLProperty u => u.Value ?? "",
-            WzConvexProperty c => "[" + string.Join(" ", Points(c).Select(pt => $"({pt.X}, {pt.Y})")) + "]",
+            WzConvexProperty c => ConvexText(c),
             WzBinaryProperty snd => SoundText(snd, owner),
             WzCanvasProperty cv => CanvasText(cv),
             WzLuaProperty lua => "lua " + (lua.Value?.Length ?? 0) + " bytes sha256:" + Short(Hash(lua.Value)),
             WzRawDataProperty raw => RawText(raw, owner),
+            WzVideoProperty video => VideoText(video, owner),
             WzNullProperty => null,
             _ => null,
         };
         return Cut(text);
     }
 
-    public static (string? Text, bool Truncated) Cut(string? text)
+    /// <summary>Cuts to <see cref="DiffOptions.MaxValueChars"/> and replaces lone surrogates (see <see cref="Clean"/>).</summary>
+    public static (string? Text, bool Truncated) Cut(string? text) => Cut(text, DiffOptions.MaxValueChars);
+
+    public static (string? Text, bool Truncated) Cut(string? text, int maxChars)
     {
-        if (text == null || text.Length <= DiffOptions.MaxValueChars)
-            return (text, false);
-        int length = DiffOptions.MaxValueChars;
+        if (text == null)
+            return (null, false);
+        if (text.Length <= maxChars)
+            return (Clean(text), false);
+        int length = maxChars;
         if (char.IsHighSurrogate(text[length - 1])) length--;   // never split a surrogate pair
-        return (text.Substring(0, length), true);
+        return (Clean(text.Substring(0, length)), true);
+    }
+
+    /// <summary>
+    /// WZ strings are raw UTF-16, so a name or value can hold a lone surrogate, which System.Text.Json refuses to write.
+    /// Every string that goes into a response passes through here: a lone surrogate becomes U+FFFD.
+    /// </summary>
+    public static string Clean(string text)
+    {
+        int i = 0;
+        for (; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) { i++; continue; }
+            if (char.IsSurrogate(c)) break;
+        }
+        if (i >= text.Length)
+            return text;
+        var chars = text.ToCharArray();
+        for (; i < chars.Length; i++)
+        {
+            char c = chars[i];
+            if (char.IsHighSurrogate(c) && i + 1 < chars.Length && char.IsLowSurrogate(chars[i + 1])) { i++; continue; }
+            if (char.IsSurrogate(c)) chars[i] = '\uFFFD';
+        }
+        return new string(chars);
+    }
+
+    /// <summary>A node name as it appears in a path or child list: lone surrogates replaced, cut at <see cref="DiffOptions.MaxNameChars"/>.</summary>
+    public static (string Text, bool Cut) NameForOutput(string? name)
+    {
+        var (text, cut) = Cut(name ?? "", DiffOptions.MaxNameChars);
+        return (text ?? "", cut);
     }
 
     /// <summary>Equality of two properties of the SAME type tag (canvas pixels are decided elsewhere).</summary>
@@ -90,14 +128,38 @@ public static class PropertyValues
                 var y = (WzVectorProperty)b;
                 return (x.X?.Value ?? 0) == (y.X?.Value ?? 0) && (x.Y?.Value ?? 0) == (y.Y?.Value ?? 0);
             case WzUOLProperty x: return string.Equals(x.Value, ((WzUOLProperty)b).Value, StringComparison.Ordinal);
-            case WzConvexProperty x: return Points(x).SequenceEqual(Points((WzConvexProperty)b));
+            case WzConvexProperty x: return ListEquals(x.WzProperties, ((WzConvexProperty)b).WzProperties, ownerA, ownerB);
             case WzBinaryProperty x:
                 var s = (WzBinaryProperty)b;
-                return x.Length == s.Length && x.SoundDataLength == s.SoundDataLength && SoundHash(x, ownerA) == SoundHash(s, ownerB);
+                return x.Length == s.Length && x.SoundDataLength == s.SoundDataLength
+                    && (x.Header ?? Array.Empty<byte>()).AsSpan().SequenceEqual(s.Header ?? Array.Empty<byte>())   // the wave format: sample rate, channels, ...
+                    && SoundHash(x, ownerA) == SoundHash(s, ownerB);
+            case WzVideoProperty x:
+                var v = (WzVideoProperty)b;
+                return x.VideoType == v.VideoType && VideoHash(x, ownerA) == VideoHash(v, ownerB);
             case WzLuaProperty x: return (x.Value ?? Array.Empty<byte>()).AsSpan().SequenceEqual(((WzLuaProperty)b).Value ?? Array.Empty<byte>());
             case WzRawDataProperty x: return RawHash(x, ownerA) == RawHash((WzRawDataProperty)b, ownerB);
-            default: return true;   // sub, canvas (decided by the canvas stages), null, video
+            default: return true;   // sub, canvas (decided by the canvas stages), null
         }
+    }
+
+    /// <summary>Same children in the same order: name, type and value of each, and of what is below each (a convex is an ordered list).</summary>
+    private static bool ListEquals(IReadOnlyList<WzImageProperty>? a, IReadOnlyList<WzImageProperty>? b, LoadedImage ownerA, LoadedImage ownerB)
+    {
+        a ??= Array.Empty<WzImageProperty>();
+        b ??= Array.Empty<WzImageProperty>();
+        if (a.Count != b.Count)
+            return false;
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (!string.Equals(a[i].Name, b[i].Name, StringComparison.Ordinal) || TypeOf(a[i]) != TypeOf(b[i]))
+                return false;
+            if (!ValueEquals(a[i], b[i], ownerA, ownerB))
+                return false;
+            if (!ListEquals(Children(a[i]), Children(b[i]), ownerA, ownerB))
+                return false;
+        }
+        return true;
     }
 
     public static bool FloatEquals(float a, float b)
@@ -106,8 +168,14 @@ public static class PropertyValues
     public static bool DoubleEquals(double a, double b)
         => BitConverter.DoubleToInt64Bits(a) == BitConverter.DoubleToInt64Bits(b) || (double.IsNaN(a) && double.IsNaN(b));
 
-    private static IEnumerable<(int X, int Y)> Points(WzConvexProperty c)
-        => (c.WzProperties ?? new WzPropertyCollection(null!)).OfType<WzVectorProperty>().Select(v => (v.X?.Value ?? 0, v.Y?.Value ?? 0));
+    /// <summary>Every child in order: a vector as (x, y), anything else as name:type, so a non-vector or extra child is visible.</summary>
+    private static string ConvexText(WzConvexProperty c)
+    {
+        IEnumerable<WzImageProperty> children = (IEnumerable<WzImageProperty>?)c.WzProperties ?? Array.Empty<WzImageProperty>();
+        return "[" + string.Join(" ", children.Select(child => child is WzVectorProperty v
+            ? $"({v.X?.Value ?? 0}, {v.Y?.Value ?? 0})"
+            : $"{child.Name}:{TypeOf(child)}")) + "]";
+    }
 
     private static string CanvasText(WzCanvasProperty c)
     {
@@ -116,7 +184,17 @@ public static class PropertyValues
     }
 
     private static string SoundText(WzBinaryProperty s, LoadedImage owner)
-        => $"sound {s.Length} ms, {s.SoundDataLength} bytes, sha256:{Short(SoundHash(s, owner))}";
+        => $"sound {s.Length} ms, {s.SoundDataLength} bytes, format:{Short(Hash(s.Header))}, sha256:{Short(SoundHash(s, owner))}";
+
+    private static string VideoText(WzVideoProperty v, LoadedImage owner)
+        => $"video type {v.VideoType}, {VideoBytes(v, owner)?.Length ?? 0} bytes, sha256:{Short(VideoHash(v, owner))}";
+
+    private static byte[]? VideoBytes(WzVideoProperty v, LoadedImage owner)
+    {
+        lock (owner.Sync) return v.GetBytes(false);
+    }
+
+    private static string VideoHash(WzVideoProperty v, LoadedImage owner) => Hash(VideoBytes(v, owner));
 
     private static string RawText(WzRawDataProperty r, LoadedImage owner)
     {

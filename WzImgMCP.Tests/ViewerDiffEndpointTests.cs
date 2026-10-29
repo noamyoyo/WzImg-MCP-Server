@@ -110,7 +110,7 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ResavedWithNothingVisible_IsChangedButSemanticallyIdentical()
+    public async Task ResavedWithOnlyHiddenColourChanged_IsChangedAndIdenticalVisible()
     {
         ImgFixture.Write(_tree.Root("canon"), "A.img", Img(1, hidden: 7));
         ImgFixture.Write(_tree.Root("owner"), "A.img", Img(1, hidden: 99));   // other bytes, the same picture
@@ -118,10 +118,12 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
 
         var (_, body) = await Get(s, "/v1/diff?person=owner&path=A.img");
         Assert.Equal("changed", body.GetProperty("state").GetString());
-        Assert.Equal("identical", body.GetProperty("semantic").GetString());
+        Assert.Equal("identical_visible", body.GetProperty("semantic").GetString());   // only the colour under alpha 0 differs: not a plain "identical"
         Assert.Equal(0, body.GetProperty("changes").GetArrayLength());
-        Assert.Equal("recompressed", body.GetProperty("canvases")[0].GetProperty("change").GetString());
-        Assert.Equal(1, body.GetProperty("summary").GetProperty("canvasesRecompressed").GetInt32());
+        Assert.Equal("hidden_color", body.GetProperty("canvases")[0].GetProperty("change").GetString());
+        Assert.Equal(1, body.GetProperty("summary").GetProperty("canvasesHiddenColour").GetInt32());
+        Assert.Equal(0, body.GetProperty("summary").GetProperty("canvasesChanged").GetInt32());
+        Assert.Contains(body.GetProperty("warnings").EnumerateArray(), w => w.GetString()!.Contains("hidden_color"));
     }
 
     [Fact]
@@ -223,7 +225,7 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
             body.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
         Assert.Equal(new[] { "exists", "matchesBase", "sha256", "sizeBytes" },
             body.GetProperty("now").EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
-        Assert.Equal(new[] { "added", "canvasesChanged", "canvasesRecompressed", "changed", "removed" },
+        Assert.Equal(new[] { "added", "canvasesChanged", "canvasesHiddenColour", "canvasesRecompressed", "changed", "removed" },
             body.GetProperty("summary").EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
     }
 
@@ -507,6 +509,20 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
         Assert.True(body.GetProperty("now").GetProperty("matchesBase").GetBoolean());   // looks "not edited" ...
         Assert.Equal("changed", body.GetProperty("state").GetString());                  // ... but the diff against canon says otherwise
         Assert.NotEqual(body.GetProperty("before").GetProperty("sha256").GetString(), body.GetProperty("now").GetProperty("sha256").GetString());
+    }
+
+    [Fact]
+    public async Task OutOfMemoryInTheDiff_Is413_AndEmptiesTheCache()
+    {
+        ImgFixture.Write(_tree.Root("canon"), "A.img", Img(1));
+        ImgFixture.Write(_tree.Root("owner"), "A.img", Img(2));
+        var s = await Start();
+        s.App.Services.GetRequiredService<ViewerDiffService>().Probe = _ => throw new OutOfMemoryException();
+
+        var (status, body) = await Get(s, "/v1/diff?person=owner&path=A.img");
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, status);
+        Assert.Equal("too_large", body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(0, s.App.Services.GetRequiredService<ViewerImageCache>().Count);   // given back, like the loader does
     }
 }
 #endif
