@@ -183,6 +183,9 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
 
     public FileIdentity? Identity(string path) => StatPath(path, followLinks: false)?.Identity;
 
+    /// <summary>True when lstat says the path is a regular file (not a link, FIFO, socket, device or directory); false when it is absent or cannot be examined. Used by the packer's tree scan.</summary>
+    public bool IsRegularFile(string path) => StatPath(path, followLinks: false)?.IsRegular == true;
+
     public PathState Probe(string path)
     {
         if (StatPath(path, followLinks: false, out int errno) != null)
