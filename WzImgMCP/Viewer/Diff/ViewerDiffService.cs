@@ -19,7 +19,15 @@ public sealed record DiffResponse(
     IReadOnlyList<DiffChange> Changes,
     IReadOnlyList<CanvasChange> Canvases,
     bool Truncated,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings)
+{
+    /// <summary>
+    /// Always <c>"advisory"</c>: <c>before/now.matchesBase</c> come from <c>.base.json</c> in the person's own root, which that
+    /// person's editor can write. The panel must not treat it as proof of "not edited" or use it to skip review; <c>state</c>
+    /// and the sha256 values (compared with canon's) decide.
+    /// </summary>
+    public string BaseTrust { get; init; } = "advisory";
+}
 
 /// <summary>
 /// Diffs a person's copy of one image against the canon copy. States: <c>unchanged</c> (same bytes), <c>changed</c>,

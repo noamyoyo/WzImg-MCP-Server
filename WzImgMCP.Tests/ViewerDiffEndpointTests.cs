@@ -182,7 +182,7 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
         ImgFixture.Write(_tree.Root("owner"), "A.img", Img(2));
         var s = await Start();
         var (_, body) = await Get(s, "/v1/diff?person=owner&path=A.img");
-        Assert.Equal(new[] { "before", "canvases", "changes", "now", "semantic", "state", "summary", "truncated", "warnings" },
+        Assert.Equal(new[] { "baseTrust", "before", "canvases", "changes", "now", "semantic", "state", "summary", "truncated", "warnings" },
             body.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
         Assert.Equal(new[] { "exists", "matchesBase", "sha256", "sizeBytes" },
             body.GetProperty("now").EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
@@ -399,6 +399,77 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
         Assert.Equal("def456", map.Get("owner", "B.img"));
         Assert.Null(map.Get("owner", "A.img"));
         Assert.Null(map.Get("nobody", "A.img"));
+    }
+
+    // ---- base map: caching of bad maps, key normalisation, advisory flag
+
+    private ViewerBaseMap NewMap() => new(_tree.Options(), new PosixViewerFileSystem());
+    private string BasePath(string person) => Path.Combine(_tree.Root(person), ".base.json");
+
+    [Fact]
+    public void BaseMap_MalformedMap_IsReadOnceUntilItChanges()
+    {
+        var map = NewMap();
+        File.WriteAllText(BasePath("owner"), "{ this is not json");
+        Assert.Null(map.Get("owner", "A.img"));
+        Assert.Null(map.Get("owner", "A.img"));
+        Assert.Null(map.Get("owner", "B.img"));
+        Assert.Equal(1, map.Reads);
+
+        File.WriteAllText(BasePath("owner"), "{ \"files\": { \"A.img\": \"abc\" } }");   // a new stamp: read again
+        Assert.Equal("abc", map.Get("owner", "A.img"));
+        Assert.Equal(2, map.Reads);
+        Assert.Equal("abc", map.Get("owner", "A.img"));
+        Assert.Equal(2, map.Reads);
+    }
+
+    [Fact]
+    public void BaseMap_OversizedMap_IsNotReadAndNotRetried()
+    {
+        var map = NewMap();
+        using (var f = File.Create(BasePath("owner")))
+            f.SetLength(64L * 1024 * 1024 + 1);   // sparse
+        Assert.Null(map.Get("owner", "A.img"));
+        Assert.Null(map.Get("owner", "A.img"));
+        Assert.Equal(0, map.Reads);   // the stamp's size is enough to refuse it
+    }
+
+    [Fact]
+    public void BaseMap_KeysAreNormalised_CaseSlashesAndLeadingDot()
+    {
+        var map = NewMap();
+        File.WriteAllText(BasePath("owner"),
+            "{ \"files\": { \"String\\\\Pet.img\": \"AA11\", \"./Map/Back.img\": \"bb22\", \"/Mob/X.img\": \"cc33\" } }");
+        Assert.Equal("aa11", map.Get("owner", "String/Pet.img"));
+        Assert.Equal("aa11", map.Get("owner", "string/pet.img"));
+        Assert.Equal("bb22", map.Get("owner", "Map/Back.img"));
+        Assert.Equal("cc33", map.Get("owner", "Mob/X.img"));
+    }
+
+    [Fact]
+    public void BaseMap_TwoSpellingsWithDifferentHashes_AreUnknown()
+    {
+        var map = NewMap();
+        File.WriteAllText(BasePath("owner"), "{ \"files\": { \"A.img\": \"11\", \"a.img\": \"22\", \"B.img\": \"33\", \"b.IMG\": \"33\" } }");
+        Assert.Null(map.Get("owner", "A.img"));
+        Assert.Equal("33", map.Get("owner", "B.img"));
+    }
+
+    [Fact]
+    public async Task Response_SaysTheBaseHashIsAdvisory_AndAnEditorWrittenHashLooksUnedited()
+    {
+        var canon = Img(1);
+        var edited = Img(2);
+        ImgFixture.Write(_tree.Root("canon"), "String/Pet.img", canon);
+        ImgFixture.Write(_tree.Root("owner"), "String/Pet.img", edited);
+        WriteBase("owner", "String/Pet.img", edited);   // the person records the hash of their own edit
+        var s = await Start();
+
+        var (_, body) = await Get(s, "/v1/diff?person=owner&path=String/Pet.img");
+        Assert.Equal("advisory", body.GetProperty("baseTrust").GetString());
+        Assert.True(body.GetProperty("now").GetProperty("matchesBase").GetBoolean());   // looks "not edited" ...
+        Assert.Equal("changed", body.GetProperty("state").GetString());                  // ... but the diff against canon says otherwise
+        Assert.NotEqual(body.GetProperty("before").GetProperty("sha256").GetString(), body.GetProperty("now").GetProperty("sha256").GetString());
     }
 }
 #endif
