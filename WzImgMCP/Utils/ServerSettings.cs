@@ -38,6 +38,7 @@ public static class ServerSettings
     public const int DefaultBulkMaxImages = 2000;
     public const string MemorySoftLimitMbEnvVar = "WZIMG_MEMORY_SOFT_LIMIT_MB";
     public const int DefaultMemorySoftLimitMb = 1536;
+    public const string GcAggressiveEnvVar = "WZIMG_GC_AGGRESSIVE";
     public const string IdleTrimSecondsEnvVar = "WZIMG_IDLE_TRIM_SECONDS";
     public const int DefaultIdleTrimSeconds = 300;
 
@@ -53,7 +54,10 @@ public static class ServerSettings
     /// <summary>Settings of the memory guard, from the environment. 0 switches the soft limit or the idle trim off.</summary>
     public static MemoryGuardSettings MemoryGuardFromEnvironment() => new(
         ParseInt(Environment.GetEnvironmentVariable(MemorySoftLimitMbEnvVar), DefaultMemorySoftLimitMb, 0, 1_048_576) * 1024L * 1024L,
-        TimeSpan.FromSeconds(ParseInt(Environment.GetEnvironmentVariable(IdleTrimSecondsEnvVar), DefaultIdleTrimSeconds, 0, 604_800)));
+        TimeSpan.FromSeconds(ParseInt(Environment.GetEnvironmentVariable(IdleTrimSecondsEnvVar), DefaultIdleTrimSeconds, 0, 604_800)))
+    {
+        AggressiveCollection = ParseFlag(Environment.GetEnvironmentVariable(GcAggressiveEnvVar), false)
+    };
 
     /// <summary>A whole number from min to max, otherwise the fallback.</summary>
     public static int ParseInt(string? value, int fallback, int min, int max)

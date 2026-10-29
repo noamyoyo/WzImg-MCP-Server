@@ -105,22 +105,98 @@ public sealed class MemoryGuardTests : IDisposable
     }
 
     [Fact]
-    public void SoftLimitTrims_AreSpacedOut_SoAHeapKeptHighByEditsIsNotCollectedAgainAndAgain()
+    public void SoftLimitTrims_ThatFreeLittle_BackOffExponentiallyUpToTenMinutes()
     {
         LoadAll("m001.img");
-        var guard = NewGuard();
-        _heap = 5000;
+        var guard = NewGuard(Defaults with { IdleTrim = TimeSpan.Zero });   // only the soft limit is looked at here
+        _heap = 5000;                                         // the fake collection frees nothing: the heap stays above the limit
 
-        Assert.NotNull(guard.Tick());
-        _clock.Advance(TimeSpan.FromSeconds(30));
-        Assert.Null(guard.Tick());                            // the next look, 30 s later: too soon
-        _clock.Advance(TimeSpan.FromSeconds(31));
-        Assert.NotNull(guard.Tick());                         // 61 s after the first
-        Assert.Equal(2, _collections);
+        Assert.NotNull(guard.Tick());                         // t = 0
+        Assert.Equal(TimeSpan.FromSeconds(120), guard.CurrentSoftInterval);
+        foreach (var expectedNext in new[] { 240, 480, 600, 600, 600 })
+        {
+            var wait = guard.CurrentSoftInterval;
+            _clock.Advance(wait - TimeSpan.FromSeconds(1));
+            Assert.Null(guard.Tick());                        // one second too soon
+            _clock.Advance(TimeSpan.FromSeconds(1));
+            Assert.NotNull(guard.Tick());
+            Assert.Equal(TimeSpan.FromSeconds(expectedNext), guard.CurrentSoftInterval);
+        }
+        Assert.Equal(6, _collections);
 
         _heap = 10;                                           // back below the limit: nothing more to do
-        _clock.Advance(TimeSpan.FromSeconds(120));
+        _clock.Advance(TimeSpan.FromSeconds(1200));
         Assert.Null(guard.Tick());
+    }
+
+    [Fact]
+    public void ATrimThatFreesMore_ResetsTheSpacing_AndSoDoesAHeapBelowTheLimit()
+    {
+        LoadAll();
+        bool freeing = false;
+        var guard = NewGuard(Defaults with { IdleTrim = TimeSpan.Zero }, collect: () => { _collections++; if (freeing) _heap = 3000; });   // 5000 -> 3000 is 40% freed
+        _heap = 5000;
+
+        Assert.NotNull(guard.Tick());                         // frees nothing: 120 s
+        _clock.Advance(TimeSpan.FromSeconds(120));
+        Assert.NotNull(guard.Tick());                         // frees nothing: 240 s
+        Assert.Equal(TimeSpan.FromSeconds(240), guard.CurrentSoftInterval);
+
+        _heap = 10;
+        Assert.Null(guard.Tick());                            // below the limit again
+        Assert.Equal(TimeSpan.FromSeconds(60), guard.CurrentSoftInterval);
+
+        _heap = 5000;
+        freeing = true;
+        _clock.Advance(TimeSpan.FromSeconds(60));
+        Assert.NotNull(guard.Tick());                         // after only 60 s, and it frees 40%
+        Assert.Equal(TimeSpan.FromSeconds(60), guard.CurrentSoftInterval);
+        _heap = 5000;                                         // the heap grows back
+        _clock.Advance(TimeSpan.FromSeconds(60));
+        Assert.NotNull(guard.Tick());                         // so the next one is not delayed
+    }
+
+    [Fact]
+    public void IsOverSoftLimit_UsesTheTimersReading_AndNeverMeasuresOrCollects()
+    {
+        LoadAll();
+        int heapReads = 0;
+        var guard = new MemoryGuard(() => _source, Defaults, _clock, () => { heapReads++; return Interlocked.Read(ref _heap); }, () => _collections++);
+
+        _heap = 5000;
+        Assert.False(guard.IsOverSoftLimit());                // before the first tick there is no reading
+        Assert.Equal(0, heapReads);
+
+        guard.Tick();                                         // reads the heap (5000: over) and trims
+        int readsAfterTick = heapReads;
+        int collectionsAfterTick = _collections;
+        for (int i = 0; i < 100; i++)
+            Assert.True(guard.IsOverSoftLimit());             // what preload and export ask before every image
+
+        Assert.Equal(readsAfterTick, heapReads);              // no measurement of its own
+        Assert.Equal(collectionsAfterTick, _collections);     // and no collection
+
+        _heap = 10;
+        _clock.Advance(TimeSpan.FromSeconds(30));
+        guard.Tick();
+        Assert.False(guard.IsOverSoftLimit());
+
+        var off = new MemoryGuard(() => _source, Defaults with { SoftLimitBytes = 0 }, _clock, () => 5000, () => { });
+        off.Tick();
+        Assert.False(off.IsOverSoftLimit());
+    }
+
+    [Fact]
+    public void TheCollection_IsNotAggressiveByDefault_AndTheSettingTurnsItOn()
+    {
+        Assert.False(Defaults.AggressiveCollection);
+        Assert.Equal(GCCollectionMode.Forced, MemoryGuard.ModeFor(Defaults.AggressiveCollection));
+        Assert.Equal(GCCollectionMode.Aggressive, MemoryGuard.ModeFor(true));
+
+        Assert.False(WzImgMCP.Utils.ServerSettings.MemoryGuardFromEnvironment().AggressiveCollection);
+        Environment.SetEnvironmentVariable(WzImgMCP.Utils.ServerSettings.GcAggressiveEnvVar, "1");
+        try { Assert.True(WzImgMCP.Utils.ServerSettings.MemoryGuardFromEnvironment().AggressiveCollection); }
+        finally { Environment.SetEnvironmentVariable(WzImgMCP.Utils.ServerSettings.GcAggressiveEnvVar, null); }
     }
 
     [Fact]
@@ -256,6 +332,7 @@ public sealed class MemoryGuardTests : IDisposable
         var line = Assert.Single(_log);
         Assert.Contains("released 9 cached image(s)", line);
         Assert.Contains("kept 1 with unsaved edits", line);
+        Assert.Contains("next soft limit trim not before 120 s", line);   // the fake collection freed nothing: the spacing doubled
         Assert.DoesNotContain(_tree.Path, line);
     }
 

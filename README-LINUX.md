@@ -144,6 +144,7 @@ Tests: `dotnet test WzImgMCP.Tests -p:LinuxBuild=true`.
 | `WZIMG_SCAN_BUDGET_SECONDS` | Time budget of a scan in seconds (default `20`, `0` = none). When it ends, the matches found so far come back with `truncated: true`. |
 | `WZIMG_BULK_MAX_IMAGES` | Sanity cap for the tools that work through a whole category on purpose, `preload_category` and `batch_export_images` (default `2000`). Above it they refuse with `scope_too_wide` unless `force=true`. |
 | `WZIMG_MEMORY_SOFT_LIMIT_MB` | Managed heap size (`GC.GetTotalMemory(false)`) above which the memory guard trims (default `1536`, `0` = never for size). |
+| `WZIMG_GC_AGGRESSIVE` | `1` makes the memory guard's collection aggressive and runs it twice (default `0`: one non-aggressive compacting collection). |
 | `WZIMG_IDLE_TRIM_SECONDS` | Seconds without any tool call after which the memory guard trims once (default `300`, `0` = never when idle). |
 | `WZIMG_TEST_WZ_PATH` | Tests only: a directory containing `String.wz` (GMS key, version 83). The image tests on real canvases also use `Morph.wz`, `Ui.wz` and `Etc.wz` from the same directory when they are there. Tests that need real data skip when it is not set. |
 
@@ -217,14 +218,18 @@ it never enters the cache, so a scan leaves the cache and its hit and miss count
 (this includes every image with unsaved edits, which a scan therefore sees as edited) is used as it is and not touched.
 
 **Memory guard.** A timer looks every 30 s at the managed heap and at the time of the last tool call. When the heap is above
-`WZIMG_MEMORY_SOFT_LIMIT_MB` (at most once a minute), or no tool call happened for `WZIMG_IDLE_TRIM_SECONDS` (once per quiet
-period), it drops every cached image without unsaved edits and runs a blocking, compacting collection that asks the runtime to
-give memory back (`GCCollectionMode.Aggressive`, LOH compaction). Images with unsaved edits are never touched. It takes no lock
+`WZIMG_MEMORY_SOFT_LIMIT_MB`, or no tool call happened for `WZIMG_IDLE_TRIM_SECONDS` (once per quiet period), it drops every cached
+image without unsaved edits and runs one blocking, compacting collection of all generations (large object heap compacted once).
+`WZIMG_GC_AGGRESSIVE=1` makes it an aggressive collection run twice (a deeper shrink, a longer pause); the default is not aggressive.
+Soft limit trims back off: the first waits at least 60 s after the previous one, and when a trim frees less than 10% of the heap
+(unsaved edits or decoded canvases hold it) the spacing doubles, 60 s, 120 s, 240 s, 480 s, up to 10 minutes, and starts again at 60 s
+after a trim that freed more or once the heap is below the limit. Images with unsaved edits are never touched. It takes no lock
 of the session and two ticks never overlap. Each trim logs one line with counts only, the format is
-`[MemoryGuard] trim (idle): released <n> cached image(s), kept <m> with unsaved edits; managed heap <x> MB -> <y> MB`. A tool call that
-is cut by a trim just reloads the image from disk the next time; the one residual is an edit that is made in the instants between
-an image being fetched from the cache and its `Changed` flag being set while a soft limit trim runs (the same window an ordinary
-cache eviction has always had).
+`[MemoryGuard] trim (idle): released <n> cached image(s), kept <m> with unsaved edits; managed heap <x> MB -> <y> MB` (a soft limit
+trim adds `; next soft limit trim not before <s> s`). `preload_category` and `batch_export_images` ask the guard whether the heap is
+above the soft limit between two images; it answers from the timer's last reading (at most 30 s old) and never measures or collects
+itself. Only real tool calls (and the steps of a scan or a preload) count as activity for the idle trim: `get_cache_stats`, which a
+monitoring loop polls, and reading the data source do not.
 
 **Edits and the memory guard.** An image a tool is about to change is protected before the tool changes anything: `BeginEdit`
 takes the lock of that image, parses it, flags it as changed (the flag is what the cache honours: eviction, `clear_cache` and the

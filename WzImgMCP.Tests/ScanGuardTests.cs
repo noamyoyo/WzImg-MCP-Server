@@ -458,6 +458,7 @@ public sealed class ScanGuardTests : IDisposable
         var guard = new MemoryGuard(() => _session.CurrentDataSource, new MemoryGuardSettings(SoftLimitBytes: 1000, IdleTrim: TimeSpan.Zero),
             heapBytes: () => bytes, collect: () => { });
         _session.UseMemoryGuard(guard);
+        guard.Tick();   // the guard answers from the reading of its last tick
     }
 
     [Fact]

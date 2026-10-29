@@ -12,8 +12,22 @@ public sealed record MemoryGuardSettings(long SoftLimitBytes, TimeSpan IdleTrim)
     /// <summary>How often the timer looks.</summary>
     public TimeSpan Interval { get; init; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>The soft limit trims at most this often, so a heap that stays high because of unsaved edits is not collected again and again.</summary>
+    /// <summary>
+    /// The soft limit trims at most this often. When a trim frees little (<see cref="MemoryGuard.LowYieldFraction"/> of the heap) the
+    /// spacing doubles up to <see cref="MaxSoftTrimInterval"/>, and it is back to this value after a trim that frees more or once the
+    /// heap is below the limit again, so a heap that stays high (unsaved edits, decoded canvases) is not collected again and again.
+    /// </summary>
     public TimeSpan MinSoftTrimInterval { get; init; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>The longest spacing between two soft limit trims that free little.</summary>
+    public TimeSpan MaxSoftTrimInterval { get; init; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// True: the trim runs an aggressive collection (twice, the second one after the finalizers), which also shrinks the heap
+    /// further but pauses longer. False (the default): one blocking, compacting collection of all generations.
+    /// WZIMG_GC_AGGRESSIVE=1 turns it on.
+    /// </summary>
+    public bool AggressiveCollection { get; init; }
 }
 
 /// <summary>What one trim did (counts only).</summary>
@@ -42,6 +56,8 @@ public sealed class MemoryGuard : IDisposable
     private int _running;                       // 1 while a tick is working
     private long _lastSoftTrim;                 // _time timestamp of the last soft limit trim
     private int _softTrimmed;                   // 1 once a soft limit trim happened
+    private TimeSpan _softInterval;             // the spacing required after the last soft limit trim (backs off while trims free little)
+    private long _heapReading;                  // the heap size the last tick saw (what IsOverSoftLimit answers from)
     private long _trimCount;
     private MemoryTrim? _lastTrim;
 
@@ -53,8 +69,15 @@ public sealed class MemoryGuard : IDisposable
         _time = time ?? TimeProvider.System;
         _heapBytes = heapBytes ?? (() => GC.GetTotalMemory(false));
         _collect = collect ?? CollectAndShrink;
+        _softInterval = settings.MinSoftTrimInterval;
         _lastActivity = _time.GetTimestamp();
     }
+
+    /// <summary>A trim that frees less than this share of the heap counts as useless and makes the next soft limit trim wait longer.</summary>
+    public const double LowYieldFraction = 0.10;
+
+    /// <summary>The spacing the next soft limit trim has to keep from the last one.</summary>
+    public TimeSpan CurrentSoftInterval => _softInterval;
 
     public MemoryGuardSettings Settings => _settings;
 
@@ -65,18 +88,12 @@ public sealed class MemoryGuard : IDisposable
     public long TrimCount => Interlocked.Read(ref _trimCount);
 
     /// <summary>
-    /// Whether the managed heap is above the soft limit even after a plain collection (the heap size counts garbage that was not
-    /// collected yet). The bulk tools (preload, export) ask this between two images and stop when it is true, because going on
-    /// would only make the next trim bigger. Always false when the soft limit is off.
+    /// Whether the heap the last tick measured is above the soft limit. The bulk tools (preload, export) ask this between two images
+    /// and stop when it is true, because going on would only make the next trim bigger. It reads the timer's last measurement (at
+    /// most one interval old) and never measures or collects itself: a collection per image would cost far more than it saves.
+    /// Always false when the soft limit is off or before the first tick.
     /// </summary>
-    public bool IsOverSoftLimit()
-    {
-        if (_settings.SoftLimitBytes <= 0 || _heapBytes() <= _settings.SoftLimitBytes)
-            return false;
-
-        GC.Collect();
-        return _heapBytes() > _settings.SoftLimitBytes;
-    }
+    public bool IsOverSoftLimit() => _settings.SoftLimitBytes > 0 && Interlocked.Read(ref _heapReading) > _settings.SoftLimitBytes;
 
     /// <summary>A tool call happened: the quiet period starts again.</summary>
     public void Touch()
@@ -120,16 +137,28 @@ public sealed class MemoryGuard : IDisposable
         try
         {
             long heap = _heapBytes();
+            Interlocked.Exchange(ref _heapReading, heap);
             long now = _time.GetTimestamp();
 
-            if (_settings.SoftLimitBytes > 0 && heap > _settings.SoftLimitBytes)
+            if (_settings.SoftLimitBytes > 0)
             {
-                if (Volatile.Read(ref _softTrimmed) == 0
-                    || _time.GetElapsedTime(Volatile.Read(ref _lastSoftTrim), now) >= _settings.MinSoftTrimInterval)
+                if (heap <= _settings.SoftLimitBytes)
+                {
+                    _softInterval = _settings.MinSoftTrimInterval;   // the heap is fine again: the next high reading trims after the shortest spacing
+                }
+                else if (Volatile.Read(ref _softTrimmed) == 0
+                    || _time.GetElapsedTime(Volatile.Read(ref _lastSoftTrim), now) >= _softInterval)
                 {
                     Volatile.Write(ref _lastSoftTrim, now);
                     Volatile.Write(ref _softTrimmed, 1);
-                    return Trim("memory_soft_limit", heap, now);
+                    var trim = Trim("memory_soft_limit", heap, now);
+
+                    // A trim that frees little (the heap is held by edits or by data the cache does not own) is not repeated at once.
+                    bool useless = trim.HeapBefore - trim.HeapAfter < (long)(trim.HeapBefore * LowYieldFraction);
+                    _softInterval = useless
+                        ? TimeSpan.FromTicks(Math.Min(_softInterval.Ticks * 2, _settings.MaxSoftTrimInterval.Ticks))
+                        : _settings.MinSoftTrimInterval;
+                    return trim;
                 }
             }
 
@@ -168,25 +197,37 @@ public sealed class MemoryGuard : IDisposable
 
         _collect();
         long heapAfter = _heapBytes();
+        Interlocked.Exchange(ref _heapReading, heapAfter);
 
         var trim = new MemoryTrim(reason, released, pinned, heapBefore, heapAfter, _time.GetUtcNow());
         Volatile.Write(ref _lastTrim, trim);
         Interlocked.Increment(ref _trimCount);
         _log?.Invoke($"[MemoryGuard] trim ({reason}): released {released} cached image(s), kept {pinned} with unsaved edits; " +
-                     $"managed heap {heapBefore / 1048576} MB -> {heapAfter / 1048576} MB");
+                     $"managed heap {heapBefore / 1048576} MB -> {heapAfter / 1048576} MB" +
+                     (reason == "memory_soft_limit" ? $"; next soft limit trim not before {(int)NextSoftInterval(heapBefore, heapAfter).TotalSeconds} s" : ""));
         return trim;
     }
 
+    private TimeSpan NextSoftInterval(long before, long after)
+        => before - after < (long)(before * LowYieldFraction)
+            ? TimeSpan.FromTicks(Math.Min(_softInterval.Ticks * 2, _settings.MaxSoftTrimInterval.Ticks))
+            : _settings.MinSoftTrimInterval;
+
+    /// <summary>The collection mode of a trim: aggressive only when asked for.</summary>
+    public static GCCollectionMode ModeFor(bool aggressive) => aggressive ? GCCollectionMode.Aggressive : GCCollectionMode.Forced;
+
     /// <summary>
-    /// A blocking, compacting collection of all generations, also of the large object heap, that asks the runtime to give the
-    /// freed memory back to the system; then once more after the finalizers ran (they close the file handles of dropped images).
+    /// One blocking, compacting collection of all generations, also of the large object heap (compacted once); with
+    /// <see cref="MemoryGuardSettings.AggressiveCollection"/> an aggressive one, repeated after the finalizers ran.
     /// </summary>
-    private static void CollectAndShrink()
+    private void CollectAndShrink()
     {
         GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-        GC.WaitForPendingFinalizers();
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+        var mode = ModeFor(_settings.AggressiveCollection);
+        GC.Collect(GC.MaxGeneration, mode, blocking: true, compacting: true);
+        GC.WaitForPendingFinalizers();   // the finalizers close the file handles of the images that were dropped
+        if (_settings.AggressiveCollection)
+            GC.Collect(GC.MaxGeneration, mode, blocking: true, compacting: true);
     }
 
     public void Dispose()
