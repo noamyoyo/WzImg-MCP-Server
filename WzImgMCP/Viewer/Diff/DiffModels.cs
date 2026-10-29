@@ -76,18 +76,18 @@ public sealed record DiffOptions
     public const int MaxPathChars = 1000;
     /// <summary>Child names listed for a collapsed added or removed subtree.</summary>
     public const int MaxSubtreeNames = 20;
-    /// <summary>Canvas limits from the plan: pixels per side and decoded bytes.</summary>
+    /// <summary>The library's own limit of pixels per side (MapleLib refuses larger canvases when it parses them).</summary>
     public const int MaxCanvasSide = 32768;
-    public const long MaxCanvasDecodedBytes = 256L * 1024 * 1024;
+
     /// <summary>
-    /// The largest canvas a DIFF decodes (width x height x 4). The library holds the raw and the BGRA buffer at once (about
-    /// twice this), and two decodes can run at the same time, so the diff stays well below the 256 MiB the picture endpoint allows.
+    /// The largest canvas a diff decodes (width x height x 4). The same value limits <c>/v1/canvas</c> (<see cref="ViewerOptions.MaxPictureBytes"/>):
+    /// the library holds the raw and the BGRA buffer at once, and several decodes can run at the same time.
     /// </summary>
-    public const long MaxDiffCanvasDecodedBytes = 64L * 1024 * 1024;
+    public long MaxCanvasBytes { get; init; } = ViewerOptions.DefaultMaxPictureMb * 1024L * 1024L;
 
     public static DiffOptions From(ViewerOptions o) => new()
     {
         MaxChanges = o.MaxChanges, MaxCanvasDecodes = o.MaxCanvasDecodes, Budget = o.DiffBudget,
-        MaxDecodedBytes = o.MaxDecodedBytes, MaxResponseBytes = o.MaxDiffResponseBytes,
+        MaxDecodedBytes = o.MaxDecodedBytes, MaxResponseBytes = o.MaxDiffResponseBytes, MaxCanvasBytes = o.MaxPictureBytes,
     };
 }

@@ -31,7 +31,7 @@ public sealed record CanvasRender(byte[] Png, int Width, int Height, int OutputW
 /// one with <c>_outlink</c> through <see cref="ViewerLinkContext"/>, so only inside the request's own source and through the same path rules and safe reader. No other link is ever read.</item>
 /// <item>The tree and the shared reader are not thread safe: every access holds <see cref="LoadedImage.Sync"/> of the image the property belongs to, one image at a time (never two at once, so there is no lock order to get wrong), and never while another image is loaded or parsed,
 /// and the lock is released before the pixels are scaled and encoded.</item>
-/// <item>Decoded size above 256 MiB, or above 32768 pixels on a side, is <c>too_large</c> (413) and is checked from the header before any decode. A PNG above 16 MiB is <c>too_large</c> as well.</item>
+/// <item>Decoded size above <see cref="ViewerOptions.MaxPictureBytes"/> (64 MiB by default, the same limit as the diff), or above 32768 pixels on a side, is <c>too_large</c> (413) and is checked from the header before any decode. A PNG above 16 MiB is <c>too_large</c> as well.</item>
 /// <item>Out of memory is 413 <c>too_large</c> and empties the cache, as in the loader.</item>
 /// </list>
 /// Synchronous; run it through <see cref="ViewerWorkRunner"/>, which holds the request and decode slots until it returns.
@@ -48,10 +48,13 @@ public sealed class ViewerCanvasService
     public const string RendererVersion = "r1";
 
     private readonly ViewerImageLoader _loader;
+    private readonly long _maxPictureBytes;
 
-    public ViewerCanvasService(ViewerImageLoader loader)
+    /// <param name="maxPictureBytes">Largest canvas (width x height x 4) that is decoded; <see cref="ViewerOptions.MaxPictureBytes"/>.</param>
+    public ViewerCanvasService(ViewerImageLoader loader, long maxPictureBytes = ViewerOptions.DefaultMaxPictureMb * 1024L * 1024L)
     {
         _loader = loader;
+        _maxPictureBytes = maxPictureBytes;
     }
 
     /// <summary>Test seam: called with "decode" just before the pixels of a canvas are read (may throw, for instance an OutOfMemoryException).</summary>
@@ -408,17 +411,17 @@ public sealed class ViewerCanvasService
 
     // ---- decoding
 
-    /// <summary>413 <c>too_large</c> when a canvas is over 32768 pixels on a side or over 256 MiB decoded (width x height x 4). Made from the header, before any decode.</summary>
-    public static void CheckDecodedSize(int width, int height)
+    /// <summary>413 <c>too_large</c> when a canvas is over 32768 pixels on a side or over <paramref name="maxBytes"/> decoded (width x height x 4). Made from the header, before any decode.</summary>
+    public static void CheckDecodedSize(int width, int height, long maxBytes)
     {
-        if (width > Diff.DiffOptions.MaxCanvasSide || height > Diff.DiffOptions.MaxCanvasSide || (long)width * height * 4 > Diff.DiffOptions.MaxCanvasDecodedBytes)
+        if (width > Diff.DiffOptions.MaxCanvasSide || height > Diff.DiffOptions.MaxCanvasSide || (long)width * height * 4 > maxBytes)
             throw new ViewerApiException(413, "too_large", "the canvas is larger than the viewer decodes");
     }
 
     /// <summary>Decodes the pixels under the owner's Sync (and nothing else under it). Size limits are checked from the header first.</summary>
     private byte[] Decode(CanvasSource source, CancellationToken cancellationToken)
     {
-        CheckDecodedSize(source.Width, source.Height);
+        CheckDecodedSize(source.Width, source.Height, _maxPictureBytes);
 
         cancellationToken.ThrowIfCancellationRequested();
         byte[]? pixels;

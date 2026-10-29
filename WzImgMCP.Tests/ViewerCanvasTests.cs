@@ -353,22 +353,90 @@ public sealed class ViewerCanvasTests : IAsyncLifetime
         await AssertError(s, Url(maxSide: "full"), HttpStatusCode.RequestEntityTooLarge, "too_large");
     }
 
+    private const long Limit64 = 64L * 1024 * 1024;
+
     [Theory]
     [InlineData(32768, 1, false)]
     [InlineData(32769, 1, true)]
     [InlineData(1, 32769, true)]
-    [InlineData(8192, 8192, false)]   // exactly 256 MiB decoded
-    [InlineData(8193, 8192, true)]
-    [InlineData(16384, 16385, true)]
-    public void DecodedSize_Over256MiBOr32768PerSide_IsTooLarge(int w, int h, bool refused)
+    [InlineData(4096, 4096, false)]   // exactly 64 MiB decoded
+    [InlineData(4097, 4096, true)]
+    [InlineData(8192, 2048, false)]
+    [InlineData(8192, 2049, true)]
+    [InlineData(5000, 5000, true)]
+    public void DecodedSize_OverTheLimitOr32768PerSide_IsTooLarge(int w, int h, bool refused)
     {
         if (!refused)
         {
-            ViewerCanvasService.CheckDecodedSize(w, h);
+            ViewerCanvasService.CheckDecodedSize(w, h, Limit64);
             return;
         }
-        var ex = Assert.Throws<ViewerApiException>(() => ViewerCanvasService.CheckDecodedSize(w, h));
+        var ex = Assert.Throws<ViewerApiException>(() => ViewerCanvasService.CheckDecodedSize(w, h, Limit64));
         Assert.Equal((413, "too_large"), (ex.Status, ex.Code));
+    }
+
+    [Fact]
+    public async Task Canvas5000x5000_IsTooLarge_AndNothingIsDecoded()
+    {
+        Write("owner", "Mob/T.img", img => img.AddProperty(Cv("stand", 5000, 5000)));
+        var s = await Start(_tree.Options(timeout: TimeSpan.FromSeconds(120)));
+        int decodes = 0;
+        s.App.Services.GetRequiredService<ViewerCanvasService>().Probe = _ => Interlocked.Increment(ref decodes);
+        await AssertError(s, Url(), HttpStatusCode.RequestEntityTooLarge, "too_large");
+        await AssertError(s, Url(maxSide: "full"), HttpStatusCode.RequestEntityTooLarge, "too_large");
+        Assert.Equal(0, decodes);   // refused from the header
+    }
+
+    [Fact]
+    public async Task Canvas4096x4096_StillRenders_AndIsScaledToTheDefault()
+    {
+        Write("owner", "Mob/T.img", img => img.AddProperty(Cv("stand", 4096, 4096)));
+        var s = await Start(_tree.Options(timeout: TimeSpan.FromSeconds(120)));
+        var response = await s.Client.GetAsync(Url());
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var small = DecodePng(await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal((1024, 1024), (small.Width, small.Height));
+        var full = await s.Client.GetAsync(Url(maxSide: "full"));
+        Assert.Equal(HttpStatusCode.OK, full.StatusCode);
+        using var big = DecodePng(await full.Content.ReadAsByteArrayAsync());
+        Assert.Equal((4096, 4096), (big.Width, big.Height));
+    }
+
+    [Fact]
+    public async Task Canvas8192x2048_RendersScaledTo4096x1024_WithFull()
+    {
+        Write("owner", "Mob/T.img", img => img.AddProperty(Cv("stand", 8192, 2048)));
+        var s = await Start(_tree.Options(timeout: TimeSpan.FromSeconds(120)));
+        var response = await s.Client.GetAsync(Url(maxSide: "full"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var bitmap = DecodePng(await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal((4096, 1024), (bitmap.Width, bitmap.Height));
+        Assert.Equal((8192, 2048), (Header(response, "X-Canvas-Width"), Header(response, "X-Canvas-Height")));
+    }
+
+    [Fact]
+    public async Task BigReduction_IsFilteredInSteps_SoStripesBecomeGrey()
+    {
+        // alternating black and white columns, reduced 8x: a single bilinear sample would be black or white, an area average is grey
+        Write("owner", "Mob/T.img", img => img.AddProperty(Cv("stand", 8192, 16, pixel: (x, y) => x % 2 == 0 ? ((byte)0, (byte)0, (byte)0, (byte)255) : ((byte)255, (byte)255, (byte)255, (byte)255))));
+        var s = await Start(_tree.Options(timeout: TimeSpan.FromSeconds(60)));
+        using var bitmap = DecodePng(await (await s.Client.GetAsync(Url())).Content.ReadAsByteArrayAsync());
+        Assert.Equal((1024, 2), (bitmap.Width, bitmap.Height));
+        foreach (var x in new[] { 3, 100, 511, 900 })
+            Assert.InRange((int)bitmap.GetPixel(x, 1).Red, 100, 155);
+    }
+
+    [Fact]
+    public void PictureLimit_ComesFromTheEnvironment_AndIsSharedWithTheDiff()
+    {
+        var token = "abcdefgh" + new string('a', 30);
+        ViewerOptions Read(string? value) => ViewerOptions.FromEnvironment(n => n switch { ViewerOptions.TokenEnvVar => token, ViewerOptions.MaxPictureMbEnvVar => value, _ => null });
+        Assert.Equal(64L * 1024 * 1024, Read(null).MaxPictureBytes);
+        Assert.Equal(1L * 1024 * 1024, Read("1").MaxPictureBytes);
+        Assert.Equal(256L * 1024 * 1024, Read("256").MaxPictureBytes);
+        foreach (var bad in new[] { "0", "257", "-1", "x", "", "1.5" })
+            Assert.Equal(64L * 1024 * 1024, Read(bad).MaxPictureBytes);
+        Assert.Equal(Read("32").MaxPictureBytes, WzImgMCP.Viewer.Diff.DiffOptions.From(Read("32")).MaxCanvasBytes);
     }
 
     [Fact]

@@ -442,7 +442,7 @@ public sealed class ImageDiffer
         }
         long decoded = (long)before.Width * before.Height * 4;
         if (before.Width <= 0 || before.Height <= 0 || before.Width > DiffOptions.MaxCanvasSide || before.Height > DiffOptions.MaxCanvasSide
-            || decoded > DiffOptions.MaxDiffCanvasDecodedBytes)
+            || decoded > _options.MaxCanvasBytes)
         {
             _undecodable++;
             ReportCanvas(path, "pixels_unverified", before, after, "canvas");

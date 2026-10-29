@@ -49,6 +49,8 @@ public sealed class ViewerOptions
     public const string DiffBudgetSecondsEnvVar = "WZ_VIEWER_DIFF_BUDGET_SECONDS";
     public const string MaxDecodedMbEnvVar = "WZ_VIEWER_MAX_DECODED_MB";
     public const string MaxDiffResponseKbEnvVar = "WZ_VIEWER_MAX_DIFF_RESPONSE_KB";
+    public const string MaxPictureMbEnvVar = "WZ_VIEWER_MAX_PICTURE_MB";
+    public const int DefaultMaxPictureMb = 64;
     public const int DefaultMaxDecodedMb = 256;
     public const int DefaultMaxDiffResponseKb = 4096;
     public const int DefaultMaxChanges = 2000;
@@ -60,6 +62,12 @@ public sealed class ViewerOptions
 
     /// <summary>Most canvas pairs one diff decodes to pixels; further differing pairs are reported as <c>pixels_unverified</c>.</summary>
     public int MaxCanvasDecodes { get; init; } = DefaultMaxCanvasDecodes;
+
+    /// <summary>
+    /// Largest canvas (width x height x 4) that is decoded, by the diff and by <c>/v1/canvas</c> alike; 64 MiB is 4096 x 4096. Peak memory of
+    /// the decodes is about <see cref="MaxDecodes"/> x 3 x this value (library buffers, and the scaling), so raise it only with more memory.
+    /// </summary>
+    public long MaxPictureBytes { get; init; } = DefaultMaxPictureMb * 1024L * 1024L;
 
     /// <summary>Most bytes of decoded pixels (width x height x 4, both sides of every pair) one diff may decode; further pairs are <c>pixels_unverified</c>.</summary>
     public long MaxDecodedBytes { get; init; } = DefaultMaxDecodedMb * 1024L * 1024L;
@@ -127,6 +135,7 @@ public sealed class ViewerOptions
             LinkBudgetBytes = ParseWhole(getEnv(LinkBudgetMbEnvVar), DefaultLinkBudgetMb, 0, 1024) * 1024L * 1024L,
             MaxChanges = (int)ParseWhole(getEnv(MaxChangesEnvVar), DefaultMaxChanges, 1, 100000),
             MaxCanvasDecodes = (int)ParseWhole(getEnv(MaxCanvasDecodesEnvVar), DefaultMaxCanvasDecodes, 0, 100000),
+            MaxPictureBytes = ParseWhole(getEnv(MaxPictureMbEnvVar), DefaultMaxPictureMb, 1, 256) * 1024L * 1024L,
             MaxDecodedBytes = ParseWhole(getEnv(MaxDecodedMbEnvVar), DefaultMaxDecodedMb, 1, 16384) * 1024L * 1024L,
             MaxDiffResponseBytes = ParseWhole(getEnv(MaxDiffResponseKbEnvVar), DefaultMaxDiffResponseKb, 16, 262144) * 1024L,
             DiffBudget = TimeSpan.FromSeconds(ParseWhole(getEnv(DiffBudgetSecondsEnvVar), DefaultDiffBudgetSeconds, 1, 600)),

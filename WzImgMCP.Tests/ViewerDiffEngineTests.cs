@@ -832,8 +832,17 @@ public sealed class ViewerDiffEngineTests : IDisposable
     }
 
     [Fact]
-    public void F9_DiffCanvasCap_IsBelowThePictureEndpointCap()
-        => Assert.True(DiffOptions.MaxDiffCanvasDecodedBytes < DiffOptions.MaxCanvasDecodedBytes);
+    public void F9_CanvasOverTheSharedLimit_IsNotDecodedByTheDiff()
+    {
+        int decodes = 0;
+        var r = Diff(img => img.AddProperty(ImgFixture.PixelCanvas("c", 16, 16, Solid(10))), img => img.AddProperty(ImgFixture.PixelCanvas("c", 16, 16, Solid(200))),
+            new DiffOptions { MaxCanvasBytes = 16 * 16 * 4 - 1, Probe = w => { if (w == "decode") decodes++; } });
+        Assert.Equal("pixels_unverified", Only(r).Detail);
+        Assert.Equal(0, decodes);
+        var ok = Diff(img => img.AddProperty(ImgFixture.PixelCanvas("c", 16, 16, Solid(10))), img => img.AddProperty(ImgFixture.PixelCanvas("c", 16, 16, Solid(200))),
+            new DiffOptions { MaxCanvasBytes = 16 * 16 * 4 });
+        Assert.Equal("pixels", Only(ok).Detail);
+    }
 
     // F10
 

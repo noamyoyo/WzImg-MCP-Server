@@ -88,7 +88,7 @@ public static class ViewerHost
         builder.Services.AddSingleton(new ViewerImageCache(options.CacheBytes));
         builder.Services.AddSingleton(sp => new ViewerImageLoader(options, sp.GetRequiredService<IViewerFileSystem>(), sp.GetRequiredService<ViewerImageCache>()));
 #if LINUX_BUILD
-        builder.Services.AddSingleton(sp => new Canvas.ViewerCanvasService(sp.GetRequiredService<ViewerImageLoader>()));
+        builder.Services.AddSingleton(sp => new Canvas.ViewerCanvasService(sp.GetRequiredService<ViewerImageLoader>(), options.MaxPictureBytes));
 #endif
         builder.Services.AddSingleton(new ViewerDecodeLimiter(options.MaxDecodes));
         builder.Services.AddSingleton(sp => new Diff.ViewerBaseMap(options, sp.GetRequiredService<IViewerFileSystem>()));
