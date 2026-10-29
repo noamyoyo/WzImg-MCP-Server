@@ -171,7 +171,7 @@ grow past its size limit) and survive `clear_cache`; `save_image` or `discard_ch
 ## Viewer mode
 
 `WzImgMCP.dll --viewer [--host 0.0.0.0] [--port 13400]` starts a separate, read-only service for looking at `.img` files
-(step V1 of the before/after viewer: only the host, the token and the path resolver exist so far, nothing parses a file yet).
+(steps V1 and V2 of the before/after viewer: the host, the token, the path resolver, a safe file reader, an image loader with a cache and `/v1/inspect`; there is no diff or rendering yet).
 It is a plain ASP.NET minimal API. It never registers the MCP server, a tool class or the session manager, so no code
 that writes a file is reachable through it, and it has no MCP endpoints (`/`, `/sse` and `/message` answer 404 or 405).
 
@@ -180,19 +180,28 @@ that writes a file is reachable through it, and it has no MCP endpoints (`/`, `/
 | `WZ_VIEWER_TOKEN` | **Required**, at least 32 characters of printable ASCII without spaces (surrounding whitespace is trimmed; anything else makes startup fail). A token with fewer than 8 distinct characters starts with a warning on standard error. The process prints a reason on standard error and exits with code 2 when it is missing or shorter. Every request, `/v1/health` included, must carry it in the `X-Viewer-Token` header (compared in constant time); otherwise the answer is 401 `unauthorized`. |
 | `WZ_VIEWER_ROOT_CANON`, `WZ_VIEWER_ROOT_OWNER`, `WZ_VIEWER_ROOT_FRIEND` | Directory of each named source. Defaults `/data/canon`, `/data/owner`, `/data/friend`. Each holds an `img` folder with the extracted tree (`<root>/img/String/Consume.img`). Mount them read-only. |
 | `WZIMG_ALLOWED_ROOT` | Same meaning as for the editors: when set, every resolved file must also be inside it. |
+| `WZ_VIEWER_MAX_FILE_MB` | Largest `.img` file read, default `128` (1 to 1024). A bigger file gets 413 `too_large`. |
+| `WZ_VIEWER_MAX_DECODES` | Parses (later also pixel decodes) running at the same time, default `2` (1 to 16). Others wait for a slot inside their request. |
+| `WZ_VIEWER_CACHE_MB` | Cap of the parsed-image cache, default `256` (0 to 16384; 0 turns caching off). It limits an estimate of the memory the parsed images hold (file bytes plus about twice a node-count estimate, measured on real files), not the process size: leave room in the container limit for the GC heap and for the 4 requests in flight. 1536 MB was enough for 2500 real files. |
 
 Endpoints (GET only; any other method gets 405 `method_not_allowed`, an unknown route 404 `not_found`):
 
 - `/v1/health` returns `{ "status": "ok", "version": "1.0.0", "sources": { "canon": true, "owner": true, "friend": true } }`; each flag says the `img` folder under that root exists and is readable. Health needs the token but does not count against the 4-request cap.
 - `/v1/resolve?source=owner&path=String/Consume.img` returns `{ "source", "path", "exists": true, "sizeBytes" }`. It only tests the path resolver; the file is not opened.
+- `/v1/inspect?source=owner&path=String/Consume.img` loads and parses the image and returns `{ "source", "path", "sizeBytes", "keyUsed", "parseMillis", "topLevelProperties", "canvasCount", "cached", "links": { "inlinks", "outlinks", "outlinksChecked", "outlinksResolved" } }`. It proves the loader; it reads no pixels. `parseMillis` is the parse time of the cached copy.
 
 Errors are JSON, `{ "error": { "code": "...", "message": "..." } }`: `unauthorized` 401, `bad_path` 400, `unknown_source` 400, `bad_request` 400
-(a request body was sent), `not_found` 404, `method_not_allowed` 405, `internal_error` 500 (generic text, never the exception), `busy` 503, `timeout` 504.
+(a request body was sent), `not_found` 404, `method_not_allowed` 405, `file_busy` 409 (the file kept changing while it was read), `too_large` 413, `parse_failed` 422 (no key fitted, or the file is damaged), `internal_error` 500 (generic text, never the exception), `busy` 503, `timeout` 504.
 
 Safety notes:
 
 - A path is accepted only when it consists of ASCII letters, digits, space, `_`, `-` and `.`, joined by `/`; it ends with `.img`, is at most 260 characters, has no empty segment, no segment that starts with `.` (so no `..`), no backslash, no `%`, and has no segment named `Backups` (any case). Names are case-sensitive and never lower-cased.
 - The file is looked up under `<root>/img`. It must be a regular file, and neither the file nor any folder between `img` and the file may be a symbolic link. The resolved path is checked against the `img` folder again, and against `WZIMG_ALLOWED_ROOT`.
+- The file is read by a separate step that does not trust the earlier check: lstat (anything but a regular file is refused before any open), `open` with `O_NOFOLLOW | O_NONBLOCK` (a FIFO cannot block it), `fstat` on the open handle (must be a regular file, same device and inode as the path the resolver checked, and `/proc/self/fd` must point at that path, so a parent folder swapped for a link in between is caught), then the size cap. The size and mtime of the open file are compared before and after the read; a change gives one re-read, then 409. It needs Linux on x86-64 or arm64.
+- Parsing: the key named in `<root>/img/manifest.json` (`encryption`) is tried first, then BMS, GMS, EMS. The parsed image is cached by (source, path, mtime, size); sources never share entries, a changed file is a new key, and an evicted image is disposed only when no request is still reading it.
+- The library cannot cancel a parse. On a timeout the client gets 504 at once, but the request slot and the decode slot stay taken until the parse has really finished, and the parse stops at its next check of the cancellation token. So a stream of timeouts cannot pile up work.
+- `_outlink` targets are looked up through MapleLib's static `ExternalImageResolver` hook, installed once. It answers only inside a viewer request, only in that request's source, through the same path rules and safe reader (a target such as `../x.img`, `Backups/x.img` or one behind a symbolic link stays unresolved), and opens at most 64 different targets per request. The real v83 trees contain no `_outlink` at all (0 of 2500 sampled files), so this is tested on synthetic files only.
+- MapleLib's parsed tree and its shared reader are not thread safe: code that reads a cached image (V3 and later) must hold `LoadedImage.Sync`.
 - At most 4 requests run at the same time (the next gets 503), a request is cut off after 30 s, and a request body is refused.
 - The log has one line per request: method, route template, status, duration. Never the query string, a header or the token.
 - Like the editors it has no TLS. Keep it on a private Docker network and do not publish its port.
