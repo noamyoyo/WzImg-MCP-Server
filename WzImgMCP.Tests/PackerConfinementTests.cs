@@ -109,10 +109,13 @@ public sealed class PackerConfinementTests : IAsyncLifetime
         var missing = Path.Combine(_outside, "not-yet.bin");
         _server.Service.Probe = (stage, id) => { if (stage == "packing") Link(Path.Combine(JobDir(id), "String.wz"), missing, directory: false); };
 
-        await _server.PackAndWait();
+        var job = await _server.PackAndWait();
 
         Assert.False(File.Exists(missing));
         Assert.Empty(Directory.GetFileSystemEntries(_outside));
+        // the move refuses to replace what is there (a link counts), so the job fails and the link is still a link to nothing
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.False(job.TryGetProperty("wz", out _));
     }
 
     [Fact]

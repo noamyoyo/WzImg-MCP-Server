@@ -41,6 +41,7 @@ public sealed class PackerOptionsTests : IDisposable
         Assert.Equal(200_000, o.MaxImages);
         Assert.Equal(TimeSpan.FromSeconds(900), o.TimeBudget);
         Assert.Equal(200, o.MaxDiffs);
+        Assert.Equal(500, o.MaxJobFolders);
         Assert.Equal(8, o.MaxConcurrentRequests);
         Assert.Equal(13500, PackerOptions.DefaultPort);
         Assert.Equal("0.0.0.0", PackerOptions.DefaultHost);
@@ -118,6 +119,7 @@ public sealed class PackerOptionsTests : IDisposable
     [InlineData("WZ_PACKER_TIME_BUDGET_SECONDS", "5")]
     [InlineData("WZ_PACKER_TIME_BUDGET_SECONDS", "99999")]
     [InlineData("WZ_PACKER_MAX_DIFFS", "0")]
+    [InlineData("WZ_PACKER_MAX_JOB_FOLDERS", "0")]
     [InlineData("WZ_PACKER_MAX_IMG_MB", "5000")]
     [InlineData("WZ_PACKER_TMP", "relative")]
     public void BadCapValues_RefuseToStart_InsteadOfFallingBack(string name, string value)
@@ -132,7 +134,7 @@ public sealed class PackerOptionsTests : IDisposable
         var o = PackerOptions.FromEnvironment(Env(new()
         {
             ["WZ_PACKER_MAX_REQUESTS"] = "2", ["WZ_PACKER_MAX_INPUT_MB"] = "10", ["WZ_PACKER_MAX_WZ_MB"] = "5", ["WZ_PACKER_MAX_IMAGES"] = "7",
-            ["WZ_PACKER_MAX_IMG_MB"] = "3", ["WZ_PACKER_TIME_BUDGET_SECONDS"] = "60", ["WZ_PACKER_MAX_DIFFS"] = "9", ["WZ_PACKER_TMP"] = "/dev/shm/",
+            ["WZ_PACKER_MAX_IMG_MB"] = "3", ["WZ_PACKER_TIME_BUDGET_SECONDS"] = "60", ["WZ_PACKER_MAX_DIFFS"] = "9", ["WZ_PACKER_MAX_JOB_FOLDERS"] = "11", ["WZ_PACKER_TMP"] = "/dev/shm/",
         }));
         Assert.Equal(2, o.MaxConcurrentRequests);
         Assert.Equal(10L * 1024 * 1024, o.MaxInputBytes);
@@ -141,6 +143,7 @@ public sealed class PackerOptionsTests : IDisposable
         Assert.Equal(3L * 1024 * 1024, o.MaxImageBytes);
         Assert.Equal(TimeSpan.FromSeconds(60), o.TimeBudget);
         Assert.Equal(9, o.MaxDiffs);
+        Assert.Equal(11, o.MaxJobFolders);
         Assert.Equal("/dev/shm", o.TempRoot);
     }
 
