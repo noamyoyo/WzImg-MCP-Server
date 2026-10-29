@@ -64,6 +64,20 @@ public sealed class MemoryGuard : IDisposable
     /// <summary>How many trims ran.</summary>
     public long TrimCount => Interlocked.Read(ref _trimCount);
 
+    /// <summary>
+    /// Whether the managed heap is above the soft limit even after a plain collection (the heap size counts garbage that was not
+    /// collected yet). The bulk tools (preload, export) ask this between two images and stop when it is true, because going on
+    /// would only make the next trim bigger. Always false when the soft limit is off.
+    /// </summary>
+    public bool IsOverSoftLimit()
+    {
+        if (_settings.SoftLimitBytes <= 0 || _heapBytes() <= _settings.SoftLimitBytes)
+            return false;
+
+        GC.Collect();
+        return _heapBytes() > _settings.SoftLimitBytes;
+    }
+
     /// <summary>A tool call happened: the quiet period starts again.</summary>
     public void Touch()
     {

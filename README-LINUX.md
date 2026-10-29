@@ -176,9 +176,10 @@ grow past its size limit) and survive `clear_cache`; `save_image` or `discard_ch
 
 ### Memory and big categories
 
-A category such as `Map` holds thousands of images (5,622 images, 628 MB of files in the data this was measured on). Before this
-change `list_images_in_category Map` opened and parsed every one of them to read their names: 60 s on a cold server (MCP clients
-give up after 30 s), 400,000 characters of answer and 1.6 GiB of memory (measured, `--memory 3g`). Now:
+A category such as `Map` holds thousands of images. Before this change `list_images_in_category` on `Map` opened and parsed every
+one of them just to read their names. Measured on the live editors: 47 s (MCP clients give up after 30 s), 400,000 characters of
+answer, and the memory of the editor went from 29 MB to 1.77 GiB. `search_by_name`, `search_by_value`, `get_category_summary` and the
+other tools that went through `GetImagesInCategory` had the same flaw. Now:
 
 | Tool | Behaviour |
 | --- | --- |
@@ -186,8 +187,8 @@ give up after 30 s), 400,000 characters of answer and 1.6 GiB of memory (measure
 | `get_category_summary` | Opens nothing: image count, total file size, subdirectories, and one page (`limit`, `offset`, as above) of images with `size_bytes`. `detailed=true` brings back the property, canvas and sound counts per image; it opens the images of the page, so it goes through the scan guard. |
 | `search_by_name`, `search_by_value`, `find_broken_uols`, `batch_search` | Scan guard (below). `category` is required unless `image` is given. |
 | `get_statistics`, `get_parsed_images`, `unload_category` | Work on the category index and on what is in the cache; they no longer load every image to count or list them. `get_parsed_images` therefore lists the images in the cache that are parsed (it used to load, and so list, every image). `unload_category` also drops the images from the cache. |
-| `preload_category` | Refused above `WZIMG_BULK_MAX_IMAGES` images unless `force=true`. Stops when the cache is 95% full (`stopped_at_cache_limit`), because going on only pushes out what was loaded a moment ago. |
-| `batch_export_images` | Same cap and `force`. The images are read one after the other and not kept in the cache. |
+| `preload_category` | Refused above `WZIMG_BULK_MAX_IMAGES` images unless `force=true`. Stops when the cache is 95% full or the next image pushes another one out (`stopped_at_cache_limit`), because going on only pushes out what was loaded a moment ago, and when the managed heap is above `WZIMG_MEMORY_SOFT_LIMIT_MB` (`stopped_at_memory_limit`). |
+| `batch_export_images` | Same cap and `force`. The images are read one after the other and not kept in the cache; the export stops (with a line in `failed`) when the managed heap is above `WZIMG_MEMORY_SOFT_LIMIT_MB`. |
 | `get_cache_stats` | Also reports `pinned_image_count`, `cache_limit_bytes`, `managed_heap_bytes`, `process_working_set_bytes`, `trim_count`, `last_trim_utc`, `last_trim_reason` and `last_trim_released_images`. |
 
 **Scan guard.** One helper (`ScanGuard`) is used by every tool that goes through many images. It first counts the images from the
@@ -203,23 +204,38 @@ it never enters the cache, so a scan leaves the cache and its hit and miss count
 `WZIMG_MEMORY_SOFT_LIMIT_MB` (at most once a minute), or no tool call happened for `WZIMG_IDLE_TRIM_SECONDS` (once per quiet
 period), it drops every cached image without unsaved edits and runs a blocking, compacting collection that asks the runtime to
 give memory back (`GCCollectionMode.Aggressive`, LOH compaction). Images with unsaved edits are never touched. It takes no lock
-of the session and two ticks never overlap. Each trim logs one line with counts only, for example
-`[MemoryGuard] trim (idle): released 860 cached image(s), kept 0 with unsaved edits; managed heap 377 MB -> 2 MB`. A tool call that
+of the session and two ticks never overlap. Each trim logs one line with counts only, the format is
+`[MemoryGuard] trim (idle): released <n> cached image(s), kept <m> with unsaved edits; managed heap <x> MB -> <y> MB`. A tool call that
 is cut by a trim just reloads the image from disk the next time; the one residual is an edit that is made in the instants between
 an image being fetched from the cache and its `Changed` flag being set while a soft limit trim runs (the same window an ordinary
 cache eviction has always had).
 
 **The size estimate.** The cache evicts when the sum of `ImgFileSystemManager.EstimateWzImageSize` passes the limit. That estimate
-used 100 bytes per property and was 2.0x to 4.8x below the real managed heap (measured over 13 categories), so a "512 MB" cache held
-1.1 GB and more, and evicted images lingered until the next full collection. It now uses the measured cost of each kind of property
-(see the comment above the constants in `ImgFileSystemManager.cs`). Measured with `GC.GetTotalMemory(true)` after loading real images
-(heap growth divided by the estimate, 1.00 = exact): Map 0.96 (300 and 1,000 images), Mob 0.97, Character 0.98, Item 0.98, Skill 0.95,
-Ui 0.97, String 1.01, Reactor 1.06, Npc 1.13. The factor before: Map 2.1, Mob 3.6, Character 3.4, Item 3.0, Skill 2.9, Npc 4.8.
-The estimate counts the parsed property tree; payloads that are read later (a canvas bitmap, a sound) are counted only while they
-are held, so the guard above looks at the real heap as well.
+used 100 bytes per property, so the cache limit was far below the real managed memory (the "512 MB" cache of the owner's editors held
+more than twice that, evicted images lingered until the next full collection, and the memory was never given back). It now counts
+what a parsed property tree occupies: the object, its name string and its slot in the parent's collection for every kind of property,
+the string characters at 2 bytes, and the payloads that are held in memory (a canvas bitmap, a sound).
 
-The Dockerfile sets `DOTNET_gcServer=0` (workstation GC: one heap, not one per core). `DOTNET_GCConserveMemory` was tried at 5, 7 and 9
-and changed nothing measurable (see the comment in the Dockerfile), so it is not set.
+Measured here with `GC.GetTotalMemory(true)` after loading synthetic trees written with MapleLib (`EstimatorTests`; heap growth divided
+by the estimate, 1.00 = exact; the same figure for the old 100-bytes-per-property formula in brackets): an animated map-like tree
+(nested sub properties, ints, vectors, strings, links, canvases) 0.99 (old 2.22), a String.wz-like tree (12 images of 3,000 entries, a sub property and two strings each)
+0.99 (old 2.14), mixed small properties 0.96 (old 2.33). The per-property constants in `ImgFileSystemManager.cs` were taken over
+from an earlier fit against real v83 images that this build environment could not reproduce (it has no game data); to check them on
+real data run the opt-in calibration test:
+
+```bash
+WZIMG_CALIBRATION_DATA=/path/to/extracted/img/tree dotnet test WzImgMCP.Tests -p:LinuxBuild=true \
+  --filter "FullyQualifiedName~Calibration_OnRealData" --logger "console;verbosity=detailed"
+```
+
+It loads up to `WZIMG_CALIBRATION_IMAGES` (default 300) images per category and prints heap growth / estimate per category; it
+skips when `WZIMG_CALIBRATION_DATA` is not set and fails only when a category is off by more than a factor of 2 either way.
+Payloads that are read later (a canvas bitmap, a sound) are counted only while they are held, so the guard above looks at the real
+heap as well.
+
+The Dockerfile sets `DOTNET_gcServer=0` (workstation GC: one heap, not one per core) and `DOTNET_GCConserveMemory=5` (compact the
+large object heap more eagerly). The second value is **unmeasured**: it was chosen by reasoning, not compared with other values
+(no game data and no Docker where this was built). Remove it if it shows no gain on real data.
 
 ## Security notes
 
@@ -430,8 +446,7 @@ combined path against the version directory (lexically, symbolic links inside th
   The upstream test `ModifyToolsTests.CanvasAndPersistenceOps_Work` accepts an error from `set_canvas_bitmap`, and its
   1x1 PNG has wrong checksums (bad IDAT CRC, zlib stream without Adler-32) that libpng rejects, so that test no longer
   proves the image path; `CanvasImagingTests` covers it with a valid PNG and a strict assertion.
-- Tests after the memory and big category work: 514 tests; without `WZIMG_TEST_WZ_PATH` 487 pass and 27 skip (474 tests, 447 pass and 27 skip before it). Not run
-  with the real WZ data variable. The estimate calibration and the container figures above were measured on a real 2 GB extracted v83 tree
-  (not part of the tests, which build their own small trees).
+- Tests after the memory and big category work: 520 tests; without `WZIMG_TEST_WZ_PATH` and `WZIMG_CALIBRATION_DATA` 492 pass and 28 skip (474 tests, 447 pass and 27 skip before it). Not run
+  with the real WZ data variable.
 - The packer's multi-IV fallback and the Lua IV preference were checked with `String.wz` (GMS) and mixed-key
   trees; the Lua preference has not been exercised against a real Lua data set.

@@ -122,7 +122,7 @@ public class LifecycleTools
         }
     }
 
-    [McpServerTool(Name = "preload_category"), Description("Preload the images of a category into the cache. Stops when the cache is full (WZIMG_CACHE_MB, default 400); refused above WZIMG_BULK_MAX_IMAGES (default 2000) images unless force is set.")]
+    [McpServerTool(Name = "preload_category"), Description("Preload the images of a category into the cache. Stops when the cache is full (WZIMG_CACHE_MB, default 400) or the managed heap is above WZIMG_MEMORY_SOFT_LIMIT_MB; refused above WZIMG_BULK_MAX_IMAGES (default 2000) images unless force is set.")]
     public string PreloadCategory(
         [Description("Category name")] string category,
         [Description("Preload even when the category holds more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false)
@@ -143,10 +143,16 @@ public class LifecycleTools
             int before = CountCachedParsed(source, category);
 
             // Load until the cache is (nearly) full: going on would only push out the images loaded a moment ago.
-            bool cacheFull = false;
+            bool cacheFull = false, memoryLimit = false;
             foreach (var path in paths)
             {
                 _session.Touch();
+                if (_session.MemoryGuard.IsOverSoftLimit())
+                {
+                    memoryLimit = true;
+                    break;
+                }
+
                 var stats = ds.GetStats();
                 if (stats.CacheLimitBytes > 0 && stats.MemoryUsageBytes >= stats.CacheLimitBytes - stats.CacheLimitBytes / 20)
                 {
@@ -155,6 +161,14 @@ public class LifecycleTools
                 }
 
                 ds.GetImage(category, path);
+
+                // An image that was read from disk and did not make the cache grow pushed another one out: it is full.
+                var afterLoad = ds.GetStats();
+                if (afterLoad.DiskReadCount > stats.DiskReadCount && afterLoad.CachedImageCount <= stats.CachedImageCount)
+                {
+                    cacheFull = true;
+                    break;
+                }
             }
 
             int after = CountCachedParsed(source, category);
@@ -165,7 +179,8 @@ public class LifecycleTools
                 LoadedCount = after,
                 NewlyLoaded = Math.Max(0, after - before),
                 TotalImages = paths.Count,
-                StoppedAtCacheLimit = cacheFull
+                StoppedAtCacheLimit = cacheFull,
+                StoppedAtMemoryLimit = memoryLimit
             };
         }
         catch (Exception ex)
@@ -282,6 +297,8 @@ public class PreloadResult : MarkdownResultBase
     public int TotalImages { get; set; }
     /// <summary>True when the call stopped early because the cache is full (false is left out of the text).</summary>
     public bool StoppedAtCacheLimit { get; set; }
+    /// <summary>True when the call stopped early because the managed heap is above WZIMG_MEMORY_SOFT_LIMIT_MB (false is left out of the text).</summary>
+    public bool StoppedAtMemoryLimit { get; set; }
 }
 
 public class UnloadResult : MarkdownResultBase

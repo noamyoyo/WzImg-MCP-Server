@@ -256,6 +256,11 @@ public class BatchTools
                 var scan = ScanGuard.Run(_session, plan, (img, cat, name) =>
                 {
                     if (totalExported >= maxImages) return true;
+                    if (_session.MemoryGuard.IsOverSoftLimit())
+                    {
+                        failed.Add($"stopped before {category}/{name}: the managed heap is above WZIMG_MEMORY_SOFT_LIMIT_MB");
+                        return true;
+                    }
 
                     try
                     {

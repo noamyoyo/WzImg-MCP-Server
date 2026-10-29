@@ -414,6 +414,72 @@ public sealed class ScanGuardTests : IDisposable
         Assert.Equal(0, Stats.CachedImageCount);
     }
 
+    [Fact]
+    public void Preload_StopsWhenTheCacheIsFull_NotLoadingWhatWouldPushOutTheLast()
+    {
+        // 12 images of about 10 MB each by the estimate against the smallest accepted cache (16 MB).
+        using var heavy = new ScanTestTree(12, propertiesPerImage: 6000);
+        Environment.SetEnvironmentVariable(WzImgMCP.Utils.ServerSettings.CacheMbEnvVar, "16");
+        try
+        {
+            using var small = heavy.NewSession();
+            var result = new LifecycleTools(small).PreloadCategory(ScanTestTree.Category);
+
+            MarkdownTestHelper.AssertSuccess(result);
+            Assert.Equal("true", Value(result, "stopped_at_cache_limit"));
+            Assert.Equal("12", Value(result, "total_images"));
+            int loaded = int.Parse(Value(result, "loaded_count"));
+            Assert.InRange(loaded, 1, 11);
+            var stats = small.DataSource.GetStats();
+            Assert.Equal(loaded, stats.CachedImageCount);
+            Assert.True(stats.MemoryUsageBytes <= stats.CacheLimitBytes);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(WzImgMCP.Utils.ServerSettings.CacheMbEnvVar, null);
+        }
+    }
+
+    private void UseHeapOf(long bytes)
+    {
+        var guard = new MemoryGuard(() => _session.CurrentDataSource, new MemoryGuardSettings(SoftLimitBytes: 1000, IdleTrim: TimeSpan.Zero),
+            heapBytes: () => bytes, collect: () => { });
+        _session.UseMemoryGuard(guard);
+    }
+
+    [Fact]
+    public void Preload_StopsWhenTheHeapIsAboveTheSoftLimit()
+    {
+        UseHeapOf(5000);
+
+        var result = new LifecycleTools(_session).PreloadCategory(ScanTestTree.Category);
+
+        MarkdownTestHelper.AssertSuccess(result);
+        Assert.Equal("true", Value(result, "stopped_at_memory_limit"));
+        Assert.Equal("0", Value(result, "newly_loaded"));
+        Assert.Equal("30", Value(result, "total_images"));
+        Assert.Equal(0, Stats.CachedImageCount);
+
+        UseHeapOf(10);
+        var again = new LifecycleTools(_session).PreloadCategory(ScanTestTree.Category);
+        Assert.Equal("30", Value(again, "newly_loaded"));
+        Assert.DoesNotContain("stopped_at_memory_limit", again);
+    }
+
+    [Fact]
+    public void BatchExport_StopsWhenTheHeapIsAboveTheSoftLimit()
+    {
+        UseHeapOf(5000);
+        var outDir = Path.Combine(_tree.Path, "out");
+
+        var result = new BatchTools(_session).BatchExportImages(ScanTestTree.Category, outDir);
+
+        MarkdownTestHelper.AssertSuccess(result);
+        Assert.Contains("WZIMG_MEMORY_SOFT_LIMIT_MB", result);
+        Assert.Equal(1, Stats.DiskReadCount);                // the first image is opened, then the guard says stop
+        Assert.Equal(0, Stats.CachedImageCount);
+    }
+
     // ---- the cache limit and the new cache statistics
 
     [Fact]
