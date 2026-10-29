@@ -137,7 +137,25 @@ Tests: `dotnet test WzImgMCP.Tests -p:LinuxBuild=true`.
 | `WZIMG_PRE_BIG_BANG` | `1` (default) or `0`. A v83 client is a pre Big Bang client and cannot read DXT images, so with `1` MapleLib's automatic format choice (`ImageFormatDetector`) never returns DXT3 or DXT5. `import_png` and `set_canvas_bitmap` do not use that automatic choice at all (`format=auto` means lossless `bgra8888`); the switch matters for code paths that still let MapleLib choose, and DXT stays available when you ask for it with `format=dxt3` / `dxt5`. Set `0` only for a post Big Bang client. |
 | `WZIMG_MAX_RESPONSE_BYTES` | Upper limit for the image and audio data in one tool response (default `8388608`, 8 MiB): the base64 text of one canvas for `get_canvas_bitmap` and `resolve_canvas_link`, the total for `get_animation_frames(metadataOnly=false)`, the base64 size of the `view_canvas` PNG, and the base64 text of the sound for `get_sound_data` and `resolve_sound_link` (omitted with a "Truncated" note that points to `export_mp3`). A 4096 x 4096 noise canvas would otherwise be about 85 MB of text. Invalid or non-positive values keep the default. |
 | `WZIMG_HOST` / `--host` | Address the HTTP transport binds to. The default is localhost. IPv6 literals are bracketed automatically. The image does **not** set it, so inside a container you must pass `--host 0.0.0.0` for other containers to reach the server. |
+| `WZIMG_DEFAULT_DATA_PATH` | Folder (an extracted IMG tree with `manifest.json`) that is opened automatically by the first tool call that needs the data source, so no `init_data_source` is needed after a restart. Default `/data/img`. The path must pass `WZIMG_ALLOWED_ROOT`. If the folder is missing, has no `manifest.json` or is outside the root, nothing is opened and the tools answer "No data source initialized. Call init_data_source first." (the next call tries again). `init_data_source` still works and always wins: after it the default folder is never opened again. `get_data_source_info` shows `auto_initialized: true` or `false`. Two simultaneous first calls open the folder once. |
+| `WZIMG_SESSION_IDLE_SECONDS` | How long an HTTP MCP session may be idle (no request in flight) before the server closes it; the next request with that session id then gets `404 Session not found`. Default `604800` (7 days), accepted range `10` to `604800`; anything else (text, decimals, out of range) falls back to the default and logs a warning at startup. The effective values are logged at startup. See "HTTP sessions" below. |
 | `WZIMG_TEST_WZ_PATH` | Tests only: a directory containing `String.wz` (GMS key, version 83). The image tests on real canvases also use `Morph.wz`, `Ui.wz` and `Etc.wz` from the same directory when they are there. Tests that need real data skip when it is not set. |
+
+### HTTP sessions
+
+`ModelContextProtocol.AspNetCore 0.1.0-preview.12` has **no stateless mode**: `HttpServerTransportOptions` has only
+`ConfigureSessionOptions`, `RunSessionHandler`, `IdleTimeout`, `MaxIdleSessionCount` and `TimeProvider`. Every client
+therefore needs a session (`Mcp-Session-Id`), kept in memory, and a session is lost when the server restarts or when it
+has been idle for `IdleTimeout`. Facts from the library code:
+
+- Any request resets the idle timer, when the request ends. A session with a request still running (or an open GET stream)
+  is never closed as idle.
+- The library checks every 5 seconds, so a session closes up to 5 seconds later than its timeout.
+- The library compares `TimeProvider.GetTimestamp()` (nanoseconds on Linux) with `IdleTimeout.Ticks` (100 ns units) without
+  converting, so a plain `IdleTimeout` of 2 hours (the library default) only lasts 72 seconds on Linux. The server scales the
+  value by the timestamp frequency (`SessionIdleSettings.ToLibraryTimeout`), so `WZIMG_SESSION_IDLE_SECONDS` is real seconds.
+- `MaxIdleSessionCount` is set to 100000 (the library default). Above that number the oldest idle sessions are closed even if
+  they are younger than the timeout.
 
 ## Security notes
 

@@ -10,30 +10,97 @@ namespace WzImgMCP.Server;
 /// </summary>
 public class WzSessionManager : IDisposable
 {
-    private IDataSource? _dataSource;
+    /// <summary>Environment variable that names the folder opened automatically on first use.</summary>
+    public const string DefaultDataPathEnvVar = "WZIMG_DEFAULT_DATA_PATH";
+    public const string DefaultDataPathFallback = "/data/img";
+
+    private volatile IDataSource? _dataSource;
     private readonly Dictionary<string, WzImage> _parsedImages = new();
+    private readonly object _initLock = new();
+    private readonly string? _defaultDataPathOverride;
+    private bool _explicitInit;
+    private bool _autoInitialized;
     private bool _disposed;
 
+    public WzSessionManager() { }
+
+    /// <summary>Test hook: uses this folder instead of WZIMG_DEFAULT_DATA_PATH for the automatic open.</summary>
+    public WzSessionManager(string? defaultDataPath) { _defaultDataPathOverride = defaultDataPath; }
+
+    /// <summary>The folder that is opened automatically when a tool needs the data source and none was opened.</summary>
+    public string DefaultDataPath
+    {
+        get
+        {
+            var v = _defaultDataPathOverride ?? Environment.GetEnvironmentVariable(DefaultDataPathEnvVar);
+            return string.IsNullOrWhiteSpace(v) ? DefaultDataPathFallback : v.Trim();
+        }
+    }
+
+    /// <summary>True when the current data source was opened by the automatic open, false after init_data_source.</summary>
+    public bool AutoInitialized { get { lock (_initLock) return _autoInitialized; } }
+
     /// <summary>
-    /// Gets whether a data source is currently initialized
+    /// Gets whether a data source is initialized. When none is, the default folder (WZIMG_DEFAULT_DATA_PATH, default
+    /// /data/img) is opened first, once, under a lock, unless init_data_source was already called. A missing folder,
+    /// a folder without manifest.json or one outside WZIMG_ALLOWED_ROOT leaves the session uninitialized (the tools
+    /// then return their usual "No data source initialized" error) and is retried on the next call.
     /// </summary>
-    public bool IsInitialized => _dataSource?.IsInitialized ?? false;
+    public bool IsInitialized => _dataSource?.IsInitialized == true || TryAutoInit();
 
     /// <summary>
     /// Gets the current data source (throws if not initialized)
     /// </summary>
-    public IDataSource DataSource => _dataSource
-        ?? throw new InvalidOperationException("Data source not initialized. Call init_data_source first.");
+    public IDataSource DataSource
+    {
+        get
+        {
+            if (_dataSource == null) TryAutoInit();
+            return _dataSource
+                ?? throw new InvalidOperationException("Data source not initialized. Call init_data_source first.");
+        }
+    }
 
     /// <summary>
     /// Gets the version info for the current data source
     /// </summary>
     public VersionInfo? VersionInfo => _dataSource?.VersionInfo;
 
+    private bool TryAutoInit()
+    {
+        lock (_initLock)
+        {
+            if (_dataSource?.IsInitialized == true) return true;
+            if (_explicitInit || _disposed) return false;   // an explicit init_data_source always wins
+            try
+            {
+                var path = PathGuard.Resolve(DefaultDataPath);
+                if (!Directory.Exists(path) || !File.Exists(Path.Combine(path, "manifest.json"))) return false;
+                OpenDataSource(path);
+                _autoInitialized = true;
+                return _dataSource?.IsInitialized == true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
     /// <summary>
     /// Initializes a new IMG filesystem data source
     /// </summary>
     public DataSourceInfo InitDataSource(string basePath)
+    {
+        lock (_initLock)
+        {
+            _explicitInit = true;
+            _autoInitialized = false;
+            return OpenDataSource(basePath);
+        }
+    }
+
+    private DataSourceInfo OpenDataSource(string basePath)
     {
         // Dispose existing data source if any
         _dataSource?.Dispose();

@@ -78,7 +78,8 @@ public class FileTools : ToolBase
                 CategoryCount = stats.CategoryCount,
                 ImageCount = stats.ImageCount,
                 CachedImageCount = stats.CachedImageCount,
-                CacheHitRatio = stats.CacheHitRatio
+                CacheHitRatio = stats.CacheHitRatio,
+                AutoInitialized = Session.AutoInitialized ? "true" : "false"
             };
         });
     }
@@ -224,6 +225,9 @@ public class DataSourceInfoData
     public int ImageCount { get; init; }
     public int CachedImageCount { get; init; }
     public double CacheHitRatio { get; init; }
+    /// <summary>"true" when the data folder was opened automatically (WZIMG_DEFAULT_DATA_PATH), "false" after init_data_source.
+    /// A string, because the markdown formatter leaves out boolean false.</summary>
+    public string AutoInitialized { get; init; } = "false";
 }
 
 public class CategoryListData

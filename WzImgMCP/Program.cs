@@ -80,6 +80,11 @@ class Program
         // Register services
         builder.Services.AddSingleton<WzSessionManager>();
 
+        // Session idle timeout (WZIMG_SESSION_IDLE_SECONDS, default 7 days). The library closes a session that has had no
+        // request in flight for this long; its default is 2 h, which on Linux lasts only 72 s (see SessionIdleSettings).
+        var idleSeconds = SessionIdleSettings.Parse(Environment.GetEnvironmentVariable(SessionIdleSettings.EnvVar), out var idleWarning);
+        var idleTimeout = SessionIdleSettings.ToLibraryTimeout(idleSeconds);
+
         // Configure MCP server with HTTP/SSE transport
         builder.Services
             .AddMcpServer(options =>
@@ -90,7 +95,11 @@ class Program
                     Version = "1.0.0"
                 };
             })
-            .WithHttpTransport()
+            .WithHttpTransport(o =>
+            {
+                o.IdleTimeout = idleTimeout;
+                o.MaxIdleSessionCount = SessionIdleSettings.MaxIdleSessionCount;
+            })
             .WithToolsFromAssembly();
 
         var app = builder.Build();
@@ -101,6 +110,12 @@ class Program
         logger.LogInformation("Streamable HTTP endpoint: POST http://{Host}:{Port}/", host, port);
         logger.LogInformation("Legacy SSE endpoint: GET http://{Host}:{Port}/sse", host, port);
         logger.LogInformation("Legacy message endpoint: POST http://{Host}:{Port}/message", host, port);
+        if (idleWarning != null)
+            logger.LogWarning("{Warning}", idleWarning);
+        logger.LogInformation("Session idle timeout: {Seconds} s (library IdleTimeout ticks {Ticks}, timestamp frequency {Frequency}/s); max idle sessions: {MaxIdle}",
+            idleSeconds, idleTimeout.Ticks, TimeProvider.System.TimestampFrequency, SessionIdleSettings.MaxIdleSessionCount);
+        logger.LogInformation("Default data folder (opened by the first tool call that needs it): {Path}",
+            app.Services.GetRequiredService<WzSessionManager>().DefaultDataPath);
 
         // Map MCP endpoints (supports both Streamable HTTP and legacy SSE)
         app.MapMcp();
