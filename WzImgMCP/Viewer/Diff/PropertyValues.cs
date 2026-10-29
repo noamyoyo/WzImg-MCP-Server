@@ -11,7 +11,7 @@ namespace WzImgMCP.Viewer.Diff;
 /// never resolved. Data behind the shared reader (sound bytes, raw data) is read under the image's
 /// <see cref="LoadedImage.Sync"/>.
 /// </summary>
-internal static class PropertyValues
+public static class PropertyValues
 {
     public static string TypeOf(WzImageProperty p) => p switch
     {

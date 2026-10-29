@@ -43,6 +43,49 @@ internal static class ImgFixture
         return stream.ToArray();
     }
 
+    /// <summary>An image with only what <paramref name="fill"/> adds (no default content).</summary>
+    public static byte[] Build(Action<WzImage> fill, WzMapleVersion key = WzMapleVersion.BMS)
+    {
+        var img = new WzImage("fixture.img") { Changed = true };
+        fill(img);
+        using var stream = new MemoryStream();
+        using (var writer = new WzBinaryWriter(stream, WzTool.GetIvByMapleVersion(key)))
+            img.SaveImage(writer, true);
+        return stream.ToArray();
+    }
+
+    /// <summary>A canvas whose pixels come from <paramref name="pixel"/> (b, g, r, a for each x, y).</summary>
+    public static WzCanvasProperty PixelCanvas(string name, int width, int height, Func<int, int, (byte B, byte G, byte R, byte A)> pixel,
+        Microsoft.Xna.Framework.Graphics.SurfaceFormat? format = null)
+    {
+        var canvas = new WzCanvasProperty(name) { PngProperty = new WzPngProperty() };
+        var pixels = new byte[width * height * 4];
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+                var (b, g, r, a) = pixel(x, y);
+                int i = (y * width + x) * 4;
+                pixels[i] = b; pixels[i + 1] = g; pixels[i + 2] = r; pixels[i + 3] = a;
+            }
+        canvas.PngProperty.SetPixelsBgra32(pixels, width, height, format ?? Microsoft.Xna.Framework.Graphics.SurfaceFormat.Bgra32);   // lossless unless asked otherwise
+        return canvas;
+    }
+
+    /// <summary>A tiny PCM WAV file, and a sound property made from it (the library keeps the file bytes).</summary>
+    public static WzBinaryProperty Sound(string name, string directory, byte tone)
+    {
+        var data = new byte[3200];
+        for (int i = 0; i < data.Length; i++) data[i] = (byte)(tone + i % 7);
+        var path = Path.Combine(directory, $"tone-{tone}.wav");
+        using (var w = new BinaryWriter(File.Create(path)))
+        {
+            w.Write("RIFF"u8.ToArray()); w.Write(36 + data.Length); w.Write("WAVE"u8.ToArray());
+            w.Write("fmt "u8.ToArray()); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(8000); w.Write(16000); w.Write((short)2); w.Write((short)16);
+            w.Write("data"u8.ToArray()); w.Write(data.Length); w.Write(data);
+        }
+        return new WzBinaryProperty(name, path);
+    }
+
     public static string Write(string root, string relative, byte[] bytes)
     {
         var path = Path.Combine(root, "img", relative);
