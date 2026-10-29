@@ -171,7 +171,7 @@ grow past its size limit) and survive `clear_cache`; `save_image` or `discard_ch
 ## Viewer mode
 
 `WzImgMCP.dll --viewer [--host 0.0.0.0] [--port 13400]` starts a separate, read-only service for looking at `.img` files
-(steps V1 and V2 of the before/after viewer: the host, the token, the path resolver, a safe file reader, an image loader with a cache and `/v1/inspect`; there is no diff or rendering yet).
+(steps V1 to V3 of the before/after viewer: the host, the token, the path resolver, a safe file reader, an image loader with a cache, `/v1/inspect` and the diff `/v1/diff`; there is no rendering of pictures yet).
 It is a plain ASP.NET minimal API. It never registers the MCP server, a tool class or the session manager, so no code
 that writes a file is reachable through it, and it has no MCP endpoints (`/`, `/sse` and `/message` answer 404 or 405).
 
@@ -183,6 +183,9 @@ that writes a file is reachable through it, and it has no MCP endpoints (`/`, `/
 | `WZ_VIEWER_MAX_FILE_MB` | Largest `.img` file read, default `64` (1 to 1024; the biggest real v83 file is about 28 MB). A bigger file gets 413 `too_large`. |
 | `WZ_VIEWER_MAX_DECODES` | Parses (later also pixel decodes) running at the same time, default `2` (1 to 16). Others wait for a slot inside their request. |
 | `WZ_VIEWER_CACHE_MB` | Cap of the parsed-image cache, default `256` (0 to 16384; 0 turns caching off). It caps what is RETAINED (an estimate of the memory the cached parsed images hold: file bytes plus about twice a node-count estimate, measured on real files), not peak memory: images being parsed, images leased by requests in flight and GC slack come on top, so leave room in the container limit. 1536 MB was enough for 2500 real files. |
+| `WZ_VIEWER_MAX_CHANGES` | Most changes `/v1/diff` lists, default `2000` (1 to 100000); more set `truncated`. |
+| `WZ_VIEWER_MAX_CANVAS_DECODES` | Canvas pairs one diff may decode to pixels, default `200` (0 to 100000). Pairs that differ in their compressed bytes beyond that are reported as `pixels_unverified` with a warning. |
+| `WZ_VIEWER_DIFF_BUDGET_SECONDS` | Wall-clock time a diff may spend comparing, default `25` (1 to 600, keep it below the 30 s request timeout). After it the list is returned as far as it got, `truncated` with a warning. |
 | `WZ_VIEWER_LINK_BUDGET_MB` | Bytes of linked images (`_outlink` targets) one request may open, default `64` (0 to 1024). Together with at most 8 different targets per request; a link past either limit stays unresolved and the response says so in `warnings`. |
 
 Endpoints (GET only; any other method gets 405 `method_not_allowed`, an unknown route 404 `not_found`):
@@ -190,9 +193,20 @@ Endpoints (GET only; any other method gets 405 `method_not_allowed`, an unknown 
 - `/v1/health` returns `{ "status": "ok", "version": "1.0.0", "sources": { "canon": true, "owner": true, "friend": true } }`; each flag says the `img` folder under that root exists and is readable. Health needs the token but does not count against the 4-request cap.
 - `/v1/resolve?source=owner&path=String/Consume.img` returns `{ "source", "path", "exists": true, "sizeBytes" }`. It only tests the path resolver; the file is not opened.
 - `/v1/inspect?source=owner&path=String/Consume.img` loads and parses the image and returns `{ "source", "path", "sizeBytes", "keyUsed", "parseMillis", "topLevelProperties", "canvasCount", "cached", "links": { "inlinks", "outlinks", "outlinksChecked", "outlinksResolved" } }`. It proves the loader; it reads no pixels. `parseMillis` is the parse time of the cached copy.
+- `/v1/diff?person=owner&path=String/Pet.img` (`person` is `owner` or `friend`) compares the person's copy (the new side) with the canon copy (the old side) and returns
+  `{ "state", "semantic", "before": { "exists", "sizeBytes", "sha256", "matchesBase" }, "now": { ... }, "summary": { "added", "removed", "changed", "canvasesChanged", "canvasesRecompressed" }, "changes": [ { "path", "kind", "type", "before", "after", "detail" } ], "canvases": [ { "path", "change", "before": { "width", "height", "format" }, "after": { ... } } ], "truncated", "warnings" }`.
+  See "Diff semantics" below.
 
 Errors are JSON, `{ "error": { "code": "...", "message": "..." } }`: `unauthorized` 401, `bad_path` 400, `unknown_source` 400, `bad_request` 400
 (a request body was sent), `not_found` 404, `method_not_allowed` 405, `file_busy` 409 (the file kept changing while it was read), `too_large` 413, `parse_failed` 422 (no key fitted, or the file is damaged), `internal_error` 500 (generic text, never the exception), `busy` 503, `timeout` 504.
+
+Diff semantics (`/v1/diff`):
+
+- `state`: `unchanged` (same bytes), `changed`, `added` (only the person has the file) or `removed` (only canon has it; the contents of a file that exists on one side only are not compared). `semantic`: `identical` when the bytes differ but no value and no picture differs ("re-saved, nothing visible changed"), otherwise `different`.
+- `matchesBase`: the sha256 of the file against the hash recorded in `<person root>/.base.json` (`files` maps `String/Pet.img` to a sha256) when the person's copy was made. `before.matchesBase` says canon is still what the copy started from; `now.matchesBase` says the copy is unedited. `null` when there is no map or no entry for the file.
+- Properties are matched by name (ordinal) per level; the order of siblings does not matter. A name that occurs more than once among siblings pairs the k-th with the k-th and appears as `name#k`. A property of another type is one change with `detail: "type"` (a short that became an int is a change); its children are not compared. A property that exists on one side only is one change; a whole subtree is one change with `descendantCount` and its first 20 child `children` names. `changes` is sorted by `path` (ordinal) and is the same for the same input.
+- Values are short invariant-culture strings, cut at 200 characters (`beforeTruncated` / `afterTruncated`). Strings compare ordinally; integers exactly and by type; floats and doubles by their bits (NaN equals NaN, -0 differs from +0; a float -0 is stored as 0 by the file format); vectors by X and Y; a UOL by its link text (never resolved); a convex by its point list; a sound by duration, length and the SHA-256 of its bytes.
+- Canvases: the generic walk reports `origin`, `delay` and the other children. For the picture itself: different width or height gives `detail: "size"`, a different pixel format `"format"`; equal SHA-256 of the compressed bytes means unchanged; otherwise (up to `WZ_VIEWER_MAX_CANVAS_DECODES` per request, one pair at a time) both are decoded to BGRA with the colour of fully transparent pixels cleared and compared: equal pixels are listed in `canvases` as `recompressed` and are NOT a change, different pixels give `"pixels"`. Over the decode limit, over 32768 pixels per side or 256 MiB decoded, or without pixel data: `"pixels_unverified"` and a warning. Linked canvases (`_inlink`/`_outlink`) are compared by their link text only, never decoded through the link, with a warning (the real v83 trees have no outlinks). `canvases` also lists the canvases inside an added or removed subtree (`change` is `added` or `removed`).
 
 Safety notes:
 
