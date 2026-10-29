@@ -90,7 +90,8 @@ internal sealed class FakeFileSystem : IViewerFileSystem
     public Func<int, FileRead, FileRead>? Rewrite { get; set; }
 
     public FileStamp? Stat(string path) => _inner.Stat(path);
-    public FileIdentity? Identity(string path) => _inner.Identity(path);
+    public Func<string, FileIdentity?>? IdentityOverride { get; set; }
+    public FileIdentity? Identity(string path) => IdentityOverride != null ? IdentityOverride(path) : _inner.Identity(path);
 
     public FileRead Read(string path, long maxBytes, FileIdentity? expected)
     {

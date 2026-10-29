@@ -88,7 +88,8 @@ public static class ViewerHost
         builder.Services.AddSingleton(new ViewerImageCache(options.CacheBytes));
         builder.Services.AddSingleton(sp => new ViewerImageLoader(options, sp.GetRequiredService<IViewerFileSystem>(), sp.GetRequiredService<ViewerImageCache>()));
         builder.Services.AddSingleton(new ViewerDecodeLimiter(options.MaxDecodes));
-        builder.Services.AddSingleton<ViewerWorkRunner>();
+        builder.Services.AddSingleton(sp => new ViewerWorkRunner(sp.GetRequiredService<ViewerDecodeLimiter>(), sp.GetRequiredService<ViewerPathResolver>(),
+            sp.GetRequiredService<ViewerImageLoader>(), options.LinkBudgetBytes));
         builder.Services.AddSingleton(new ViewerRequestLimiter(options.MaxConcurrentRequests));
         return builder;
     }

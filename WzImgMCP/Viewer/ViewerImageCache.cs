@@ -3,7 +3,11 @@ using MapleLib.WzLib;
 namespace WzImgMCP.Viewer;
 
 /// <summary>Cache key: a new mtime or size is a new key, and sources never share entries.</summary>
-public readonly record struct ImageKey(string Source, string Path, long MtimeTicks, long Size);
+/// <remarks>
+/// <c>Manifest</c> is the key the source's manifest names (empty when none), so a changed manifest is a new key. A file
+/// rewritten with the same size AND the same mtime is not detected.
+/// </remarks>
+public readonly record struct ImageKey(string Source, string Path, long MtimeTicks, long Size, string Manifest = "");
 
 /// <summary>
 /// A parsed image and what is known about it. Reference counted: the cache holds one reference and every user holds

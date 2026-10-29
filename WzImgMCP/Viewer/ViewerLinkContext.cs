@@ -17,18 +17,25 @@ namespace WzImgMCP.Viewer;
 public sealed class ViewerLinkContext : IDisposable
 {
     /// <summary>Most different link targets one request may open; more are left unresolved.</summary>
-    public const int MaxLinkedImages = 64;
+    public const int MaxLinkedImages = 8;
 
     private static readonly AsyncLocal<ViewerLinkContext?> CurrentContext = new();
     private readonly ViewerPathResolver _resolver;
     private readonly ViewerImageLoader _loader;
     private readonly CancellationToken _cancellationToken;
     private readonly Dictionary<string, ImageLease?> _leases = new(StringComparer.Ordinal);
+    private readonly long _maxBytes;
+    private long _bytes;
 
     public string Source { get; }
 
-    public ViewerLinkContext(string source, ViewerPathResolver resolver, ViewerImageLoader loader, CancellationToken cancellationToken)
+    /// <summary>Links left unresolved because the count or the byte budget of this context was used up.</summary>
+    public int SkippedByBudget { get; private set; }
+
+    public ViewerLinkContext(string source, ViewerPathResolver resolver, ViewerImageLoader loader, CancellationToken cancellationToken,
+        long maxBytes = ViewerOptions.DefaultLinkBudgetMb * 1024L * 1024L)
     {
+        _maxBytes = maxBytes;
         Source = source;
         _resolver = resolver;
         _loader = loader;
@@ -64,12 +71,22 @@ public sealed class ViewerLinkContext : IDisposable
         if (_leases.TryGetValue(imagePath, out var known))
             return known?.Image;
         if (_leases.Count >= MaxLinkedImages)
+        {
+            SkippedByBudget++;
             return null;
+        }
 
         ImageLease? lease = null;
         try
         {
-            lease = _loader.Load(_resolver.Resolve(Source, imagePath), _cancellationToken);
+            var resolved = _resolver.Resolve(Source, imagePath);
+            if (_bytes + resolved.SizeBytes > _maxBytes)
+            {
+                SkippedByBudget++;   // not remembered: a smaller target later may still fit
+                return null;
+            }
+            lease = _loader.Load(resolved, _cancellationToken);
+            _bytes += lease.Loaded.FileBytes;
         }
         catch (ViewerApiException)
         {

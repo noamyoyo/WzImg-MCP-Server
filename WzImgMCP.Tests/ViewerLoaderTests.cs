@@ -1,5 +1,4 @@
 #if LINUX_BUILD
-using MapleLib.Helpers;
 using MapleLib.WzLib;
 using MapleLib.WzLib.WzProperties;
 using WzImgMCP.Utils;
@@ -28,12 +27,13 @@ public sealed class ViewerLoaderTests : IDisposable
         _tree.Dispose();
     }
 
-    private (ViewerImageLoader Loader, ViewerPathResolver Resolver, ViewerImageCache Cache) Make(ViewerOptions? options = null, IViewerFileSystem? fs = null)
+    private (ViewerImageLoader Loader, ViewerPathResolver Resolver, ViewerImageCache Cache) Make(ViewerOptions? options = null, IViewerFileSystem? fs = null, Action? clearErrors = null)
     {
         options ??= _tree.Options();
         fs ??= new PosixViewerFileSystem();
         var cache = new ViewerImageCache(options.CacheBytes);
-        return (new ViewerImageLoader(options, fs, cache), new ViewerPathResolver(options.Roots, fs), cache);
+        // never the real ErrorLogger by default: it is process wide and other tests use it
+        return (new ViewerImageLoader(options, fs, cache, clearErrors ?? (() => { })), new ViewerPathResolver(options.Roots, fs), cache);
     }
 
     private static ViewerApiException Fails(Action action) => Assert.Throws<ViewerApiException>(action);
@@ -116,38 +116,42 @@ public sealed class ViewerLoaderTests : IDisposable
     }
 
     [Fact]
-    public void Load_NoKeyFits_IsParseFailed_AndLeavesNoLoggedErrors()
+    public void Load_NoKeyFits_IsParseFailed_AndClearsTheLibraryErrors()
     {
         var bytes = ImgFixture.Bytes(WzMapleVersion.BMS, customIv: new byte[] { 1, 2, 3, 4 });   // a key the viewer does not know
         ImgFixture.Write(_tree.Root("owner"), "Custom.img", bytes);
-        var (loader, resolver, cache) = Make();
+        int cleared = 0;
+        var (loader, resolver, cache) = Make(clearErrors: () => Interlocked.Increment(ref cleared));
         var ex = Fails(() => loader.Load(resolver.Resolve("owner", "Custom.img"), CancellationToken.None));
         AssertError(ex, 422, "parse_failed");
         Assert.Equal(0, cache.Count);
-        Assert.Equal(0, ErrorLogger.NumberOfErrorsPresent());
+        Assert.Equal(1, cleared);
     }
 
     [Fact]
-    public void Load_TruncatedFile_IsParseFailed()
+    public void Load_ClearsTheLibraryErrorsAfterEveryParse_AlsoTheSuccessfulOnes_ButNotOnCacheHits()
     {
-        var bytes = ImgFixture.Bytes(WzMapleVersion.BMS);
-        ImgFixture.Write(_tree.Root("owner"), "Cut.img", bytes.Take(bytes.Length / 2).ToArray());
-        var (loader, resolver, _) = Make();
-        AssertError(Fails(() => loader.Load(resolver.Resolve("owner", "Cut.img"), CancellationToken.None)), 422, "parse_failed");
+        ImgFixture.Write(_tree.Root("owner"), "A.img");
+        int cleared = 0;
+        var (loader, resolver, _) = Make(clearErrors: () => Interlocked.Increment(ref cleared));
+        var resolved = resolver.Resolve("owner", "A.img");
+        loader.Load(resolved, CancellationToken.None).Dispose();
+        Assert.Equal(1, cleared);
+        loader.Load(resolved, CancellationToken.None).Dispose();   // cache hit: no parse
+        Assert.Equal(1, cleared);
     }
 
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(5000)]
-    public void Load_GarbageFile_IsParseFailed_AndLeavesNoLoggedErrors(int length)
+    public void Load_GarbageFile_IsParseFailed(int length)
     {
         var bytes = new byte[length];
         new Random(42).NextBytes(bytes);
         ImgFixture.Write(_tree.Root("owner"), "Junk.img", bytes);
         var (loader, resolver, _) = Make();
         AssertError(Fails(() => loader.Load(resolver.Resolve("owner", "Junk.img"), CancellationToken.None)), 422, "parse_failed");
-        Assert.Equal(0, ErrorLogger.NumberOfErrorsPresent());
     }
 
     [Fact]
@@ -441,6 +445,215 @@ public sealed class ViewerLoaderTests : IDisposable
         Assert.True(l.Loaded.Cost > s.Loaded.Cost + 500 * 100);
     }
 
+    // ---- single flight
+
+    private static async Task WaitUntil(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "condition not reached in time");
+            await Task.Yield();
+        }
+    }
+
+    [Fact]
+    public async Task SingleFlight_ConcurrentLoadsOfTheSameFile_ShareOneParse()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "A.img");
+        using var gate = new ManualResetEventSlim(false);
+        var fs = new FakeFileSystem { BlockReads = gate };
+        var (loader, resolver, cache) = Make(fs: fs);
+        var resolved = resolver.Resolve("owner", "A.img");
+
+        var tasks = Enumerable.Range(0, 4).Select(_ => Task.Run(() => loader.Load(resolved, CancellationToken.None))).ToList();
+        Assert.True(await fs.ReadEntered.WaitAsync(TimeSpan.FromSeconds(30)));
+        await WaitUntil(() => loader.Joins == 3);   // the other three are waiting for the first
+        gate.Set();
+        var leases = await Task.WhenAll(tasks);
+
+        Assert.Equal(1, fs.Reads);
+        Assert.Equal(1, loader.Parses);
+        Assert.Equal(1, cache.Count);
+        Assert.All(leases, l => Assert.Same(leases[0].Loaded, l.Loaded));
+        var loaded = leases[0].Loaded;
+        foreach (var l in leases) l.Dispose();
+        Assert.False(loaded.Disposed, "still cached");
+    }
+
+    [Fact]
+    public async Task SingleFlight_ResultTooBigToCache_IsStillSharedAndDisposedWithTheLastLease()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "A.img");
+        using var gate = new ManualResetEventSlim(false);
+        var fs = new FakeFileSystem { BlockReads = gate };
+        var (loader, resolver, cache) = Make(_tree.Options(cacheBytes: 100), fs);
+        var resolved = resolver.Resolve("owner", "A.img");
+
+        var tasks = Enumerable.Range(0, 3).Select(_ => Task.Run(() => loader.Load(resolved, CancellationToken.None))).ToList();
+        Assert.True(await fs.ReadEntered.WaitAsync(TimeSpan.FromSeconds(30)));
+        await WaitUntil(() => loader.Joins == 2);
+        gate.Set();
+        var leases = await Task.WhenAll(tasks);
+
+        Assert.Equal(0, cache.Count);
+        Assert.Equal(1, loader.Parses);
+        var loaded = leases[0].Loaded;
+        Assert.All(leases, l => Assert.Same(loaded, l.Loaded));
+        leases[0].Dispose();
+        leases[1].Dispose();
+        Assert.False(loaded.Disposed);
+        leases[2].Dispose();
+        Assert.True(loaded.Disposed, "every reference, the flight's included, has been given back");
+    }
+
+    [Fact]
+    public async Task SingleFlight_WaiterThatIsCancelled_LeavesTheParseRunning()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "A.img");
+        using var gate = new ManualResetEventSlim(false);
+        var fs = new FakeFileSystem { BlockReads = gate };
+        var (loader, resolver, _) = Make(fs: fs);
+        var resolved = resolver.Resolve("owner", "A.img");
+
+        var creator = Task.Run(() => loader.Load(resolved, CancellationToken.None));
+        Assert.True(await fs.ReadEntered.WaitAsync(TimeSpan.FromSeconds(30)));
+        using var cts = new CancellationTokenSource();
+        var waiter = Task.Run(() => loader.Load(resolved, cts.Token));
+        await WaitUntil(() => loader.Joins == 1);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
+
+        gate.Set();
+        using var lease = await creator;
+        Assert.Equal(1, fs.Reads);
+        Assert.False(lease.Loaded.Disposed);
+    }
+
+    [Fact]
+    public async Task SingleFlight_CreatorThatIsCancelled_DoesNotFailTheWaiter()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "A.img");
+        using var gate = new ManualResetEventSlim(false);
+        var fs = new FakeFileSystem { BlockReads = gate };
+        var (loader, resolver, _) = Make(fs: fs);
+        var resolved = resolver.Resolve("owner", "A.img");
+
+        using var cts = new CancellationTokenSource();
+        var creator = Task.Run(() => loader.Load(resolved, cts.Token));
+        Assert.True(await fs.ReadEntered.WaitAsync(TimeSpan.FromSeconds(30)));
+        var waiter = Task.Run(() => loader.Load(resolved, CancellationToken.None));
+        await WaitUntil(() => loader.Joins == 1);
+
+        cts.Cancel();      // the creator's request goes away ...
+        gate.Set();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => creator);
+        using var lease = await waiter;   // ... the waiter parses for itself
+        Assert.NotNull(lease.Image);
+        Assert.Equal(2, fs.Reads);
+        Assert.Equal(1, loader.Parses);
+    }
+
+    [Fact]
+    public async Task SingleFlight_ParseFailure_IsTheSameTypedErrorForEveryone()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "Junk.img", new byte[3000]);
+        using var gate = new ManualResetEventSlim(false);
+        var fs = new FakeFileSystem { BlockReads = gate };
+        var (loader, resolver, _) = Make(fs: fs);
+        var resolved = resolver.Resolve("owner", "Junk.img");
+
+        var tasks = Enumerable.Range(0, 3).Select(_ => Task.Run(() => loader.Load(resolved, CancellationToken.None))).ToList();
+        Assert.True(await fs.ReadEntered.WaitAsync(TimeSpan.FromSeconds(30)));
+        await WaitUntil(() => loader.Joins == 2);
+        gate.Set();
+        foreach (var t in tasks)
+            AssertError(await Assert.ThrowsAsync<ViewerApiException>(() => t), 422, "parse_failed");
+        Assert.Equal(1, loader.Parses);
+    }
+
+    // ---- fail closed
+
+    [Fact]
+    public void Load_WithoutTheIdentityTheResolverRecorded_IsRefusedBeforeAnyRead()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "A.img");
+        var fs = new FakeFileSystem { IdentityOverride = _ => null };
+        var (loader, resolver, _) = Make(fs: fs);
+        var resolved = resolver.Resolve("owner", "A.img");
+        Assert.Null(resolved.Identity);
+        AssertError(Fails(() => loader.Load(resolved, CancellationToken.None)), 400, "bad_path");
+        Assert.Equal(0, fs.Reads);
+    }
+
+    [Fact]
+    public void Read_CompareWithTheProcLink_AcceptsOnlyTheCheckedPath()
+    {
+        var path = ImgFixture.Write(_tree.Root("owner"), "A.img");
+        var identity = new PosixViewerFileSystem().Identity(path);
+        Assert.NotNull(identity);
+
+        Assert.Equal(new FileInfo(path).Length, new PosixViewerFileSystem(_ => path).Read(path, 1 << 20, identity).Bytes.Length);                 // matches
+        AssertError(Fails(() => new PosixViewerFileSystem(_ => path + "x").Read(path, 1 << 20, identity)), 400, "bad_path");                      // points elsewhere
+        AssertError(Fails(() => new PosixViewerFileSystem(_ => null).Read(path, 1 << 20, identity)), 400, "bad_path");                            // /proc unreadable: fail closed
+        AssertError(Fails(() => new PosixViewerFileSystem(_ => throw new UnauthorizedAccessException()).Read(path, 1 << 20, identity)), 400, "bad_path");
+        AssertError(Fails(() => new PosixViewerFileSystem(_ => throw new IOException()).Read(path, 1 << 20, identity)), 400, "bad_path");
+        // no expected identity (the manifest): the link is not compared at all
+        Assert.NotEmpty(new PosixViewerFileSystem(_ => null).Read(path, 1 << 20, null).Bytes);
+    }
+
+    // ---- memory
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Parse_OutOfMemory_Is413_AndTheCacheIsEmptied(bool insufficient)
+    {
+        ImgFixture.Write(_tree.Root("owner"), "Keep.img");
+        ImgFixture.Write(_tree.Root("owner"), "Boom.img");
+        var (loader, resolver, cache) = Make();
+        loader.Load(resolver.Resolve("owner", "Keep.img"), CancellationToken.None).Dispose();
+        Assert.Equal(1, cache.Count);
+
+        loader.ParseProbe = _ => throw (insufficient ? new InsufficientMemoryException("detail that must not leak") : new OutOfMemoryException("detail that must not leak"));
+        var ex = Fails(() => loader.Load(resolver.Resolve("owner", "Boom.img"), CancellationToken.None));
+        AssertError(ex, 413, "too_large");
+        Assert.DoesNotContain("detail", ex.Message);
+        Assert.Equal(0, cache.Count);
+
+        loader.ParseProbe = null;   // the loader is still usable
+        using var again = loader.Load(resolver.Resolve("owner", "Boom.img"), CancellationToken.None);
+        Assert.NotNull(again.Image);
+    }
+
+    [Fact]
+    public void Read_OutOfMemory_Is413()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "A.img");
+        var fs = new FakeFileSystem { Rewrite = (_, _) => throw new OutOfMemoryException() };
+        var (loader, resolver, _) = Make(fs: fs);
+        AssertError(Fails(() => loader.Load(resolver.Resolve("owner", "A.img"), CancellationToken.None)), 413, "too_large");
+    }
+
+    // ---- manifest in the key
+
+    [Fact]
+    public void Cache_ChangedManifestKey_IsANewKey()
+    {
+        ImgFixture.WriteManifest(_tree.Root("owner"), "BMS");
+        ImgFixture.Write(_tree.Root("owner"), "A.img");
+        var (loader, resolver, cache) = Make();
+        using var first = loader.Load(resolver.Resolve("owner", "A.img"), CancellationToken.None);
+        Assert.Equal("BMS", first.Loaded.Key.Manifest);
+
+        File.WriteAllText(Path.Combine(_tree.Root("owner"), "img", "manifest.json"), "{ \"encryption\": \"GMS\", \"padding\": \"to change the size\" }");
+        using var second = loader.Load(resolver.Resolve("owner", "A.img"), CancellationToken.None);
+        Assert.False(second.FromCache);
+        Assert.Equal("GMS", second.Loaded.Key.Manifest);
+        Assert.Equal(1, cache.Count);
+        Assert.Equal("BMS", second.Loaded.KeyUsed);   // the file is still BMS: the order changed, the answer did not
+    }
+
     // ---- options
 
     [Fact]
@@ -451,15 +664,17 @@ public sealed class ViewerLoaderTests : IDisposable
         var set = new Dictionary<string, string>
         {
             [ViewerOptions.TokenEnvVar] = token,
-            [ViewerOptions.MaxFileMbEnvVar] = "7", [ViewerOptions.MaxDecodesEnvVar] = "3", [ViewerOptions.CacheMbEnvVar] = "50",
+            [ViewerOptions.MaxFileMbEnvVar] = "7", [ViewerOptions.MaxDecodesEnvVar] = "3", [ViewerOptions.CacheMbEnvVar] = "50", [ViewerOptions.LinkBudgetMbEnvVar] = "5",
         };
         var o = ViewerOptions.FromEnvironment(n => Env(set, n));
         Assert.Equal(7L * 1024 * 1024, o.MaxFileBytes);
         Assert.Equal(3, o.MaxDecodes);
         Assert.Equal(50L * 1024 * 1024, o.CacheBytes);
+        Assert.Equal(5L * 1024 * 1024, o.LinkBudgetBytes);
 
         var defaults = ViewerOptions.FromEnvironment(n => n == ViewerOptions.TokenEnvVar ? token : null);
-        Assert.Equal(128L * 1024 * 1024, defaults.MaxFileBytes);
+        Assert.Equal(64L * 1024 * 1024, defaults.MaxFileBytes);
+        Assert.Equal(64L * 1024 * 1024, defaults.LinkBudgetBytes);
         Assert.Equal(2, defaults.MaxDecodes);
         Assert.Equal(256L * 1024 * 1024, defaults.CacheBytes);
 
@@ -467,7 +682,7 @@ public sealed class ViewerLoaderTests : IDisposable
         {
             var b = ViewerOptions.FromEnvironment(n => n == ViewerOptions.TokenEnvVar ? token
                 : n is ViewerOptions.MaxFileMbEnvVar or ViewerOptions.MaxDecodesEnvVar ? bad : null);
-            Assert.Equal(128L * 1024 * 1024, b.MaxFileBytes);
+            Assert.Equal(64L * 1024 * 1024, b.MaxFileBytes);
             Assert.Equal(2, b.MaxDecodes);
         }
     }

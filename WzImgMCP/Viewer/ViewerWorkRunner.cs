@@ -15,9 +15,12 @@ public sealed class ViewerWorkRunner
     private readonly ViewerDecodeLimiter _decodeLimiter;
     private readonly ViewerPathResolver _resolver;
     private readonly ViewerImageLoader _loader;
+    private readonly long _linkBudgetBytes;
 
-    public ViewerWorkRunner(ViewerDecodeLimiter decodeLimiter, ViewerPathResolver resolver, ViewerImageLoader loader)
+    public ViewerWorkRunner(ViewerDecodeLimiter decodeLimiter, ViewerPathResolver resolver, ViewerImageLoader loader,
+        long linkBudgetBytes = ViewerOptions.DefaultLinkBudgetMb * 1024L * 1024L)
     {
+        _linkBudgetBytes = linkBudgetBytes;
         _decodeLimiter = decodeLimiter;
         _resolver = resolver;
         _loader = loader;
@@ -33,7 +36,7 @@ public sealed class ViewerWorkRunner
             {
                 try
                 {
-                    using var context = new ViewerLinkContext(source, _resolver, _loader, cancellationToken);
+                    using var context = new ViewerLinkContext(source, _resolver, _loader, cancellationToken, _linkBudgetBytes);
                     using var scope = context.Enter();
                     return work(context);
                 }

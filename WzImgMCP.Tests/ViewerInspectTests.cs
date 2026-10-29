@@ -181,8 +181,8 @@ public sealed class ViewerInspectTests : IAsyncLifetime
     public async Task Runner_NeverRunsMoreWorkThanTheDecodeCap()
     {
         var runner = Runner(2, out _);
-        using var gate = new ManualResetEventSlim(false);
-        var entered = new SemaphoreSlim(0);
+        var permits = new SemaphoreSlim(0);    // each permit lets one running work item finish
+        var started = new SemaphoreSlim(0);
         int active = 0, max = 0;
 
         int Work(ViewerLinkContext _)
@@ -190,16 +190,24 @@ public sealed class ViewerInspectTests : IAsyncLifetime
             int now = Interlocked.Increment(ref active);
             int seen;
             while ((seen = Volatile.Read(ref max)) < now && Interlocked.CompareExchange(ref max, now, seen) != seen) { }
-            entered.Release();
-            gate.Wait();
+            started.Release();
+            permits.Wait();
             Interlocked.Decrement(ref active);
             return 1;
         }
 
         var tasks = Enumerable.Range(0, 6).Select(_ => runner.RunAsync("owner", null, CancellationToken.None, Work)).ToList();
-        Assert.True(await entered.WaitAsync(TimeSpan.FromSeconds(30)));
-        Assert.True(await entered.WaitAsync(TimeSpan.FromSeconds(30)));
-        gate.Set();
+
+        // two start (and only two can); each later start needs a finish first, which the test grants one at a time
+        Assert.True(await started.WaitAsync(TimeSpan.FromSeconds(30)));
+        Assert.True(await started.WaitAsync(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, Volatile.Read(ref active));
+        for (int finished = 0; finished < 4; finished++)
+        {
+            permits.Release();                                                    // one finishes ...
+            Assert.True(await started.WaitAsync(TimeSpan.FromSeconds(30)));      // ... and exactly then the next one starts
+        }
+        permits.Release(2);                                                       // the last two
         await Task.WhenAll(tasks);
 
         Assert.Equal(2, Volatile.Read(ref max));   // two ran together, never a third
@@ -331,6 +339,7 @@ public sealed class ViewerInspectTests : IAsyncLifetime
         var result = Inspect(loader, resolver, "owner", "Mob/A.img");
         Assert.Equal(3, result.CanvasCount);
         Assert.Equal(new LinkSummary(0, 1, 1, 1), result.Links);
+        Assert.Empty(result.Warnings);
     }
 
     [Fact]
@@ -413,6 +422,46 @@ public sealed class ViewerInspectTests : IAsyncLifetime
         var result = Inspect(loader, resolver, "owner", "Mob/A.img");
         Assert.Equal(10, result.Links.OutlinksResolved);
         Assert.Equal(2, fs.Reads);   // A and B, once each
+    }
+
+    [Fact]
+    public void Outlink_MoreThanEightTargets_StayUnresolvedWithAWarning()
+    {
+        for (int i = 0; i < 10; i++)
+            ImgFixture.Write(_tree.Root("owner"), $"Mob/T{i}.img");
+        ImgFixture.Write(_tree.Root("owner"), "Mob/A.img", WzMapleVersion.BMS, img =>
+        {
+            for (int i = 0; i < 10; i++) WithLink("l" + i, $"Mob/T{i}.img/1")(img);
+        });
+        var (loader, resolver) = Services();
+        var result = Inspect(loader, resolver, "owner", "Mob/A.img");
+        Assert.Equal(ViewerLinkContext.MaxLinkedImages, result.Links.OutlinksResolved);
+        Assert.Equal(10, result.Links.Outlinks);
+        var warning = Assert.Single(result.Warnings);
+        Assert.Contains("2 link(s)", warning);
+    }
+
+    [Fact]
+    public void Outlink_ByteBudget_LeavesTheLinkUnresolved_WithoutThrowing()
+    {
+        var path = ImgFixture.Write(_tree.Root("owner"), "Mob/B.img");
+        var size = new FileInfo(path).Length;
+        var (loader, resolver) = Services();
+
+        using (var tight = new ViewerLinkContext("owner", resolver, loader, CancellationToken.None, maxBytes: size - 1))
+        {
+            Assert.Null(tight.LoadLinked("Mob/B.img"));
+            Assert.Equal(1, tight.SkippedByBudget);
+        }
+        using (var enough = new ViewerLinkContext("owner", resolver, loader, CancellationToken.None, maxBytes: size))
+        {
+            Assert.NotNull(enough.LoadLinked("Mob/B.img"));
+            Assert.Equal(0, enough.SkippedByBudget);
+            ImgFixture.Write(_tree.Root("owner"), "Mob/C.img");
+            Assert.Null(enough.LoadLinked("Mob/C.img"));   // the budget is used up by B
+            Assert.Equal(1, enough.SkippedByBudget);
+            Assert.NotNull(enough.LoadLinked("Mob/B.img"));   // B again costs nothing
+        }
     }
 
     [Fact]

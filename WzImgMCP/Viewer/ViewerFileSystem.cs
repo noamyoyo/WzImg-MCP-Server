@@ -51,6 +51,14 @@ public interface IViewerFileSystem
 /// </summary>
 public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
 {
+    private readonly Func<int, string?> _procLinkReader;
+
+    /// <param name="procLinkReader">Test seam: where the open handle <c>fd</c> really points (null when that cannot be read). The default reads /proc/self/fd.</param>
+    public PosixViewerFileSystem(Func<int, string?>? procLinkReader = null)
+    {
+        _procLinkReader = procLinkReader ?? ReadProcLink;
+    }
+
     private const int O_RDONLY = 0;
     private const int O_NONBLOCK = 0x800;
     private const int O_CLOEXEC = 0x80000;
@@ -136,12 +144,18 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
         if (!first.IsRegular)
             throw new ViewerApiException(400, "bad_path", "not a regular file");   // also a symbolic link, FIFO, socket, device
 
-        int fd = open(path, O_RDONLY | NoFollowFlag | O_NONBLOCK | O_CLOEXEC);
-        if (fd < 0)
+        int fd;
+        int errno = 0;
+        int attempts = 0;
+        do
         {
-            int errno = Marshal.GetLastPInvokeError();
-            throw errno == ELOOP ? new ViewerApiException(400, "bad_path", "symbolic links are not allowed") : NotFound();
+            fd = open(path, O_RDONLY | NoFollowFlag | O_NONBLOCK | O_CLOEXEC);
+            if (fd < 0)
+                errno = Marshal.GetLastPInvokeError();
         }
+        while (fd < 0 && errno == EINTR && ++attempts < 8);   // a signal interrupted the call: try again
+        if (fd < 0)
+            throw errno == ELOOP ? new ViewerApiException(400, "bad_path", "symbolic links are not allowed") : NotFound();
 
         try
         {
@@ -150,7 +164,7 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
                 throw new ViewerApiException(400, "bad_path", "not a regular file");
             if (opened.Identity != first.Identity || (expected.HasValue && opened.Identity != expected.Value))
                 throw new ViewerApiException(400, "bad_path", "the file is not the one that was checked");
-            if (expected.HasValue && !HandleIsAt(fd, path))
+            if (expected.HasValue && !HandleIsAt(fd, path, _procLinkReader))
                 throw new ViewerApiException(400, "bad_path", "the file is not the one that was checked");
             if (opened.Size > maxBytes)
                 throw new ViewerApiException(413, "too_large", "the image is larger than the viewer accepts");
@@ -183,19 +197,19 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
         }
     }
 
-    /// <summary>True when /proc/self/fd/N points at <paramref name="path"/>; true when /proc cannot be read (nothing to compare).</summary>
-    private static bool HandleIsAt(int fd, string path)
+    /// <summary>
+    /// True only when the open handle really points at <paramref name="path"/>. Fails closed: when the link cannot be read
+    /// (no /proc, no permission) the file is refused, because the parent-folder check could not be made.
+    /// </summary>
+    private static bool HandleIsAt(int fd, string path, Func<int, string?> reader)
     {
-        try
-        {
-            var target = new FileInfo("/proc/self/fd/" + fd).LinkTarget;
-            return target == null || string.Equals(target, path, StringComparison.Ordinal);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return true;
-        }
+        string? target;
+        try { target = reader(fd); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+        return target != null && string.Equals(target, path, StringComparison.Ordinal);
     }
+
+    private static string? ReadProcLink(int fd) => new FileInfo("/proc/self/fd/" + fd).LinkTarget;
 
     private static ViewerApiException NotFound() => new(404, "not_found", "image not found");
 }

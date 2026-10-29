@@ -39,9 +39,11 @@ public sealed class ViewerOptions
     public const string MaxFileMbEnvVar = "WZ_VIEWER_MAX_FILE_MB";
     public const string MaxDecodesEnvVar = "WZ_VIEWER_MAX_DECODES";
     public const string CacheMbEnvVar = "WZ_VIEWER_CACHE_MB";
-    public const int DefaultMaxFileMb = 128;
+    public const int DefaultMaxFileMb = 64;
     public const int DefaultMaxDecodes = 2;
     public const int DefaultCacheMb = 256;
+    public const string LinkBudgetMbEnvVar = "WZ_VIEWER_LINK_BUDGET_MB";
+    public const int DefaultLinkBudgetMb = 64;
 
     /// <summary>Largest .img file the viewer reads; a bigger one gets 413 <c>too_large</c>.</summary>
     public long MaxFileBytes { get; init; } = DefaultMaxFileMb * 1024L * 1024L;
@@ -51,6 +53,9 @@ public sealed class ViewerOptions
 
     /// <summary>Upper bound for the estimated memory of the parsed-image cache.</summary>
     public long CacheBytes { get; init; } = DefaultCacheMb * 1024L * 1024L;
+
+    /// <summary>Most bytes of linked images (_outlink targets) one request may open; a link past it stays unresolved.</summary>
+    public long LinkBudgetBytes { get; init; } = DefaultLinkBudgetMb * 1024L * 1024L;
 
     /// <summary>Longest time one request may run before it is cut off with 504 <c>timeout</c>.</summary>
     public TimeSpan RequestTimeout { get; init; } = DefaultRequestTimeout;
@@ -94,6 +99,7 @@ public sealed class ViewerOptions
             MaxFileBytes = ParseWhole(getEnv(MaxFileMbEnvVar), DefaultMaxFileMb, 1, 1024) * 1024L * 1024L,
             MaxDecodes = (int)ParseWhole(getEnv(MaxDecodesEnvVar), DefaultMaxDecodes, 1, 16),
             CacheBytes = ParseWhole(getEnv(CacheMbEnvVar), DefaultCacheMb, 0, 16384) * 1024L * 1024L,
+            LinkBudgetBytes = ParseWhole(getEnv(LinkBudgetMbEnvVar), DefaultLinkBudgetMb, 0, 1024) * 1024L * 1024L,
         };
     }
 

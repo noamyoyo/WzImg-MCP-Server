@@ -6,7 +6,7 @@ namespace WzImgMCP.Viewer;
 /// <summary>What <c>/v1/inspect</c> reports about one image.</summary>
 public sealed record InspectResult(
     string Source, string Path, long SizeBytes, string KeyUsed, long ParseMillis,
-    int TopLevelProperties, int CanvasCount, bool Cached, LinkSummary Links);
+    int TopLevelProperties, int CanvasCount, bool Cached, LinkSummary Links, IReadOnlyList<string> Warnings);
 
 /// <summary>Canvases that point at another canvas. <c>OutlinksChecked</c> is capped; only the checked ones are resolved.</summary>
 public sealed record LinkSummary(int Inlinks, int Outlinks, int OutlinksChecked, int OutlinksResolved);
@@ -57,7 +57,9 @@ public static class ViewerInspector
             return new InspectResult(
                 resolved.Source, resolved.RelativePath, loaded.FileBytes, loaded.KeyUsed, loaded.ParseMillis,
                 loaded.Image.WzProperties.Count, canvases, lease.FromCache,
-                new LinkSummary(inlinks, outlinks, checkedOutlinks, resolvedOutlinks));
+                new LinkSummary(inlinks, outlinks, checkedOutlinks, resolvedOutlinks),
+                links.SkippedByBudget == 0 ? Array.Empty<string>()
+                    : new[] { $"{links.SkippedByBudget} link(s) stayed unresolved: the per-request limit of linked images or bytes was reached" });
         }
     }
 }
