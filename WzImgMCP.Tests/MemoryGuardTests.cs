@@ -10,6 +10,7 @@ namespace WzImgMCP.Tests;
 /// and never an image with unsaved edits. A fake clock, a fake heap size and a counting collection replace the real ones, so
 /// nothing sleeps and nothing allocates.
 /// </summary>
+[Collection("AllowedRootEnv")]   // the real collections measure the heap of the whole process: nothing else may run meanwhile
 public sealed class MemoryGuardTests : IDisposable
 {
     private sealed class FakeClock : TimeProvider
@@ -357,20 +358,64 @@ public sealed class MemoryGuardTests : IDisposable
         Assert.Equal("1", MarkdownTestHelper.GetFirstValue(stats, "cached_image_count"));
     }
 
-    [Fact]
-    public void TheRealCollectionRuns_AndShrinksTheHeap()
+    /// <summary>Holds 64 MB of large arrays; the test lets go of them by clearing the field (a debug build keeps locals alive for the whole method).</summary>
+    private sealed class Ballast
     {
-        LoadAll();
-        var garbage = new byte[16 * 1024 * 1024];
-        garbage[0] = 1;
-        using var session = _tree.NewSession();
-        var guard = new MemoryGuard(() => session.CurrentDataSource, new MemoryGuardSettings(1, TimeSpan.Zero), _clock);
+        public byte[][]? Arrays;
 
-        var trim = guard.Tick();     // real heap size and real GC: the soft limit of one byte is always exceeded
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public void Allocate()
+        {
+            var arrays = new byte[4][];
+            for (int i = 0; i < arrays.Length; i++)
+            {
+                arrays[i] = new byte[16 * 1024 * 1024];
+                arrays[i][0] = 1;                             // touched: committed memory
+            }
+            Arrays = arrays;
+        }
+    }
+
+    /// <summary>
+    /// The real collection (no seam for it): the first heap reading sees the 64 MB, which the test lets go of at that moment, and the
+    /// reading after the trim must be lower by most of it. Runs in the serial collection: a collection of the whole process heap is
+    /// measured, so no other test may allocate or collect while it runs.
+    /// </summary>
+    private void RealCollectionShrinksTheHeap(bool aggressive)
+    {
+        for (int i = 0; i < 3; i++) { GC.Collect(2, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); }
+        long baseline = GC.GetTotalMemory(true);              // what the process holds without the 64 MB
+        var ballast = new Ballast();
+        ballast.Allocate();
+        int readings = 0;
+        var settings = new MemoryGuardSettings(SoftLimitBytes: 1, IdleTrim: TimeSpan.Zero) { AggressiveCollection = aggressive };
+        var guard = new MemoryGuard(() => null, settings, _clock, heapBytes: () =>
+        {
+            long heap = GC.GetTotalMemory(false);
+            if (++readings == 1)
+                ballast.Arrays = null;                        // from here on the arrays are garbage
+            return heap;
+        });
+
+        var trim = guard.Tick();                              // the soft limit of one byte is always exceeded
 
         Assert.NotNull(trim);
-        Assert.True(trim!.HeapAfter > 0);
-        GC.KeepAlive(garbage);
+        Assert.Equal(2, readings);
+        Assert.True(trim!.HeapBefore >= baseline + 60L * 1024 * 1024, $"before the trim the heap held {trim.HeapBefore} bytes over a baseline of {baseline}");
+        Assert.True(trim.HeapAfter <= baseline + 8L * 1024 * 1024,
+            $"the trim left {(trim.HeapAfter - baseline) / 1048576.0:F1} MB above the baseline ({baseline} -> {trim.HeapBefore} -> {trim.HeapAfter})");
+    }
+
+    [Fact]
+    public void TheRealCollection_ShrinksTheHeap()
+    {
+        RealCollectionShrinksTheHeap(aggressive: false);
+    }
+
+    [Fact]
+    public void TheRealAggressiveCollection_ShrinksTheHeap()
+    {
+        RealCollectionShrinksTheHeap(aggressive: true);
     }
 
     [Fact]

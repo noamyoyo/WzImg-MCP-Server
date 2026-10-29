@@ -481,7 +481,7 @@ combined path against the version directory (lexically, symbolic links inside th
   The upstream test `ModifyToolsTests.CanvasAndPersistenceOps_Work` accepts an error from `set_canvas_bitmap`, and its
   1x1 PNG has wrong checksums (bad IDAT CRC, zlib stream without Adler-32) that libpng rejects, so that test no longer
   proves the image path; `CanvasImagingTests` covers it with a valid PNG and a strict assertion.
-- Tests after the memory and big category work: 520 tests; without `WZIMG_TEST_WZ_PATH` and `WZIMG_CALIBRATION_DATA` 492 pass and 28 skip (474 tests, 447 pass and 27 skip before it). Not run
+- Tests after the memory and big category work (and its review): 547 tests; without `WZIMG_TEST_WZ_PATH` and `WZIMG_CALIBRATION_DATA` 519 pass and 28 skip (474 tests, 447 pass and 27 skip before it). Not run
   with the real WZ data variable.
 - The packer's multi-IV fallback and the Lua IV preference were checked with `String.wz` (GMS) and mixed-key
   trees; the Lua preference has not been exercised against a real Lua data set.
