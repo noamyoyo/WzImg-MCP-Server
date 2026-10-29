@@ -175,6 +175,53 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SomethingOnTheWayThatCannotBeExamined_Is503_NotAddedOrRemoved()
+    {
+        // as root nothing is unsearchable, so the file system says it: a folder that does not answer, a nested mount that is down
+        ImgFixture.Write(_tree.Root("canon"), "Mob/Sub/A.img", Img(1));
+        ImgFixture.Write(_tree.Root("owner"), "Mob/Sub/A.img", Img(2));
+        ImgFixture.Write(_tree.Root("canon"), "Other/B.img", Img(1));
+        ImgFixture.Write(_tree.Root("owner"), "Other/B.img", Img(2));
+        var fs = new FakeFileSystem
+        {
+            ProbeOverride = p => p.EndsWith(Path.Combine("owner", "img", "Mob", "Sub")) ? PathState.Unavailable : null,
+        };
+        var s = await Start(fs: fs);
+
+        foreach (var url in new[] { "/v1/diff?person=owner&path=Mob/Sub/A.img", "/v1/resolve?source=owner&path=Mob/Sub/A.img" })
+        {
+            var (status, body) = await Get(s, url);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, status);
+            Assert.Equal("source_unavailable", body.GetProperty("error").GetProperty("code").GetString());
+        }
+        // the same folder in canon answers, and another path of the person is fine
+        Assert.Equal("changed", (await Get(s, "/v1/diff?person=owner&path=Other/B.img")).Body.GetProperty("state").GetString());
+        Assert.Equal(HttpStatusCode.OK, (await s.Client.GetAsync("/v1/resolve?source=canon&path=Mob/Sub/A.img")).StatusCode);
+    }
+
+    [Fact]
+    public async Task AFolderThatIsReallyAbsent_IsStillNotFound_SoTheStatesStayRight()
+    {
+        ImgFixture.Write(_tree.Root("canon"), "Mob/Sub/A.img", Img(1));
+        var s = await Start();
+        var (status, body) = await Get(s, "/v1/diff?person=owner&path=Mob/Sub/A.img");
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("removed", body.GetProperty("state").GetString());
+    }
+
+    [Fact]
+    public void Probe_SeparatesAbsentFromPresent()
+    {
+        var fs = new PosixViewerFileSystem();
+        var file = ImgFixture.Write(_tree.Root("owner"), "A.img", Img(1));
+        Assert.Equal(PathState.Present, fs.Probe(file));
+        Assert.Equal(PathState.Present, fs.Probe(Path.GetDirectoryName(file)!));
+        Assert.Equal(PathState.Absent, fs.Probe(Path.Combine(_tree.Root("owner"), "img", "Nope.img")));
+        Assert.Equal(PathState.Absent, fs.Probe(Path.Combine(file, "below-a-file")));   // ENOTDIR
+        Assert.Equal(PathState.Absent, fs.Probe(Path.Combine(_tree.Root("owner"), "img", new string('x', 300))));   // ENAMETOOLONG
+    }
+
+    [Fact]
     public async Task FileMissingInAReadableRoot_StillGivesAddedOrRemoved()
     {
         ImgFixture.Write(_tree.Root("owner"), "OnlyMine.img", Img(1));

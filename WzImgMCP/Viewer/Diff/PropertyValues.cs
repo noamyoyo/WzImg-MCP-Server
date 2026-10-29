@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using MapleLib.WzLib;
 using MapleLib.WzLib.WzProperties;
 
@@ -134,7 +135,7 @@ public static class PropertyValues
             case WzBinaryProperty x:
                 var s = (WzBinaryProperty)b;
                 return x.Length == s.Length && x.SoundDataLength == s.SoundDataLength
-                    && (x.Header ?? Array.Empty<byte>()).AsSpan().SequenceEqual(s.Header ?? Array.Empty<byte>())   // the wave format: sample rate, channels, ...
+                    && SoundFormatKey(x) == SoundFormatKey(s)   // the wave format: sample rate, channels, ...
                     && SoundHash(x, ownerA) == SoundHash(s, ownerB);
             case WzVideoProperty x:
                 var v = (WzVideoProperty)b;
@@ -186,7 +187,28 @@ public static class PropertyValues
     }
 
     private static string SoundText(WzBinaryProperty s, LoadedImage owner)
-        => $"sound {s.Length} ms, {s.SoundDataLength} bytes, format:{Short(Hash(s.Header))}, sha256:{Short(SoundHash(s, owner))}";
+        => $"sound {s.Length} ms, {s.SoundDataLength} bytes, format:{Short(Hash(Encoding.UTF8.GetBytes(SoundFormatKey(s))))}, sha256:{Short(SoundHash(s, owner))}";
+
+    /// <summary>
+    /// The wave format of a sound as DECODED fields (encoding, channels, sample rate, byte rate, block align, bits, extra size and,
+    /// for MP3, its extra fields), plus the part of the header in front of the format. The raw <c>Header</c> bytes are not
+    /// comparable: when the file was encrypted MapleLib keeps the wave format XORed with that file's key, so the same sound saved
+    /// under another key has other header bytes. A header whose format MapleLib could not parse is compared as raw bytes.
+    /// </summary>
+    internal static string SoundFormatKey(WzBinaryProperty s)
+    {
+        var header = s.Header ?? Array.Empty<byte>();
+        var f = s.WavFormat;
+        if (f == null)
+            return "raw:" + Hash(header);
+        int prefixLength = Math.Min(header.Length, WzBinaryProperty.soundHeader.Length + 1);   // the GUIDs and the length byte are never encrypted
+        var key = new StringBuilder(Hash(header.AsSpan(0, prefixLength).ToArray()));
+        key.Append('|').Append((int)f.Encoding).Append('|').Append(f.Channels).Append('|').Append(f.SampleRate).Append('|').Append(f.AverageBytesPerSecond)
+           .Append('|').Append(f.BlockAlign).Append('|').Append(f.BitsPerSample).Append('|').Append(f.ExtraSize);
+        if (f is NAudio.Wave.Mp3WaveFormat mp3)
+            key.Append("|mp3|").Append((int)mp3.id).Append('|').Append((int)mp3.flags).Append('|').Append(mp3.blockSize).Append('|').Append(mp3.framesPerBlock).Append('|').Append(mp3.codecDelay);
+        return key.ToString();
+    }
 
     private static string VideoText(WzVideoProperty v, LoadedImage owner)
         => $"video type {v.VideoType}, {VideoBytes(v, owner)?.Length ?? 0} bytes, sha256:{Short(VideoHash(v, owner))}";

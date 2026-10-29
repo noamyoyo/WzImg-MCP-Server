@@ -597,6 +597,58 @@ public sealed class ViewerCanvasTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Outlink_LoadsTheOtherImage_WithoutHoldingTheLockOfTheFirstOne()
+    {
+        Write("owner", "Mob/Target.img", img => img.AddProperty(Cv("pic", 7, 3)));
+        Write("owner", "Mob/T.img", img =>
+        {
+            img.AddProperty(LinkCanvas("stand", "_outlink", "Mob/Target.img/pic"));
+            img.AddProperty(Cv("plain", 4, 4));
+        });
+        using var gate = new ManualResetEventSlim(false);
+        var fs = new FakeFileSystem();
+        var s = await Start(_tree.Options(timeout: TimeSpan.FromSeconds(60)), fs);
+        var loader = s.App.Services.GetRequiredService<ViewerImageLoader>();
+        var resolver = s.App.Services.GetRequiredService<ViewerPathResolver>();
+        Assert.Equal(HttpStatusCode.OK, (await s.Client.GetAsync(Url(node: "plain"))).StatusCode);   // T.img is parsed and cached; Target.img is not
+        LoadedImage first;
+        using (var lease = loader.Load(resolver.Resolve("owner", "Mob/T.img"), CancellationToken.None)) first = lease.Loaded;
+        while (fs.ReadEntered.Wait(0)) { }
+
+        fs.BlockReads = gate;   // from now on a read of Target.img waits
+        var request = s.Client.GetAsync(Url());   // the link: T.img is described, then Target.img is opened
+        Assert.True(await fs.ReadEntered.WaitAsync(TimeSpan.FromSeconds(20)), "the other image was never opened");
+
+        // the request is inside the load of the other image: nobody may hold the lock of the first one
+        bool free = Monitor.TryEnter(first.Sync, TimeSpan.FromSeconds(5));
+        if (free) Monitor.Exit(first.Sync);
+        gate.Set();
+        Assert.True(free, "the lock of the first image was held while the other image was loaded");
+        Assert.Equal(HttpStatusCode.OK, (await request).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("Mob/8800141.img/8800141.png", "Mob/8800141.img", "8800141.png")]
+    [InlineData("/Mob/8800141.img/a/b", "Mob/8800141.img", "a/b")]
+    [InlineData("Mob\\8800141.IMG\\x", "Mob/8800141.IMG", "x")]
+    [InlineData("  Mob/A.img/x  ", "Mob/A.img", "x")]
+    [InlineData("A.img/x/y/z", "A.img", "x/y/z")]
+    public void TrySplitOutlink_SplitsAtTheFirstImgSegment(string link, string image, string property)
+    {
+        Assert.True(ViewerCanvasService.TrySplitOutlink(link, out var i, out var p));
+        Assert.Equal((image, property), (i, p));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("Mob/8800141.png")]
+    [InlineData("Mob/A.img")]
+    [InlineData("Mob/A.img/")]
+    [InlineData("x.imgx/y")]
+    public void TrySplitOutlink_RefusesWhatHasNoImageOrNoProperty(string link)
+        => Assert.False(ViewerCanvasService.TrySplitOutlink(link, out _, out _));
+
+    [Fact]
     public async Task LinkThatDoesNotResolve_IsNotFound_NotThePlaceholder()
     {
         Write("owner", "Mob/T.img", img =>

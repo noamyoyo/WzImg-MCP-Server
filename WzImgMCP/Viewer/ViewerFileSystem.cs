@@ -9,6 +9,9 @@ namespace WzImgMCP.Viewer;
 /// </summary>
 public readonly record struct FileStamp(long Size, long MtimeTicks, long CtimeTicks = 0, ulong Inode = 0);
 
+/// <summary>What a path is, as far as lstat can tell: not there, there, or "cannot say" (permission, I/O error, a mount that does not answer).</summary>
+public enum PathState { Absent, Present, Unavailable }
+
 /// <summary>Device and inode: which file it really is, whatever path was used to reach it.</summary>
 public readonly record struct FileIdentity(ulong Device, ulong Inode);
 
@@ -41,6 +44,12 @@ public interface IViewerFileSystem
 
     /// <summary>The identity of the file at <paramref name="path"/> without following a final link, or null.</summary>
     FileIdentity? Identity(string path);
+
+    /// <summary>
+    /// lstat with the answer kept apart: <see cref="PathState.Absent"/> only for "no such file or folder" (ENOENT, ENOTDIR, a link loop,
+    /// a name that is too long); any other error is <see cref="PathState.Unavailable"/>, which is NOT "the file is missing".
+    /// </summary>
+    PathState Probe(string path);
 }
 
 /// <summary>
@@ -91,6 +100,7 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
     private const int ENFILE = 23;
     private const int EMFILE = 24;
     private const int ELOOP = 40;
+    private const int ENAMETOOLONG = 36;
     private const int OpenAttempts = 8;
 
     /// <summary>O_NOFOLLOW differs between CPU families (x86: 0x20000, arm64: 0x8000).</summary>
@@ -172,6 +182,13 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
     public FileStamp? Stat(string path) => StatPath(path, followLinks: false)?.Stamp;
 
     public FileIdentity? Identity(string path) => StatPath(path, followLinks: false)?.Identity;
+
+    public PathState Probe(string path)
+    {
+        if (StatPath(path, followLinks: false, out int errno) != null)
+            return PathState.Present;
+        return errno is ENOENT or ENOTDIR or ELOOP or ENAMETOOLONG ? PathState.Absent : PathState.Unavailable;
+    }
 
     public FileRead Read(string path, long maxBytes, FileIdentity? expected)
     {

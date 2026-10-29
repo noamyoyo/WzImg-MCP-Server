@@ -579,6 +579,33 @@ public sealed class ViewerDiffEngineTests : IDisposable
     }
 
     [Fact]
+    public void F18_SameSoundUnderAnotherKey_IsNotAChange_ButAnotherFormatIs()
+    {
+        var dir = Directory.CreateTempSubdirectory("viewer-wav-").FullName;
+        try
+        {
+            // MapleLib keeps the wave format XORed with the file's key when a file is encrypted: other key, other raw header bytes
+            WzBinaryProperty Reencrypted(WzBinaryProperty source)
+            {
+                var copy = ImgFixture.Sound("a", dir, 10);
+                var header = (byte[])source.Header.Clone();
+                for (int i = WzBinaryProperty.soundHeader.Length + 1; i < header.Length; i++) header[i] ^= (byte)(0x35 + i);
+                copy.Header = header;
+                return copy;
+            }
+            var original = ImgFixture.Sound("a", dir, 10);
+            Assert.NotEqual(original.Header, Reencrypted(original).Header);
+            var same = DiffMemory(img => img.AddProperty(original), img => img.AddProperty(Reencrypted(original)));
+            Assert.Empty(same.Changes);
+
+            // a real difference of format is still seen (the header bytes alone changing is not)
+            var other = DiffMemory(img => img.AddProperty(ImgFixture.Sound("a", dir, 10, sampleRate: 8000)), img => img.AddProperty(ImgFixture.Sound("a", dir, 10, sampleRate: 22050)));
+            Assert.Single(other.Changes);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void F4_Video_BytesAreCompared()
     {
         var same = Diff(img => img.AddProperty(new WzVideoProperty("v", 1, new byte[] { 1, 2, 3, 4 })), img => img.AddProperty(new WzVideoProperty("v", 1, new byte[] { 1, 2, 3, 4 })));

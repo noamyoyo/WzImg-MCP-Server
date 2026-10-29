@@ -29,7 +29,7 @@ public sealed record CanvasRender(byte[] Png, int Width, int Height, int OutputW
 /// A bad pattern is <c>bad_path</c> (400). A node that does not exist, or is not a canvas (or, for frames, not a container), is <c>not_found</c> (404): one answer, whatever the reason.</item>
 /// <item>UOLs on the way and as the node itself are followed inside the same image. A canvas with <c>_inlink</c> is followed inside its image;
 /// one with <c>_outlink</c> through <see cref="ViewerLinkContext"/>, so only inside the request's own source and through the same path rules and safe reader. No other link is ever read.</item>
-/// <item>The tree and the shared reader are not thread safe: every access holds <see cref="LoadedImage.Sync"/> of the image the property belongs to, one image at a time (never two at once, so there is no lock order to get wrong),
+/// <item>The tree and the shared reader are not thread safe: every access holds <see cref="LoadedImage.Sync"/> of the image the property belongs to, one image at a time (never two at once, so there is no lock order to get wrong), and never while another image is loaded or parsed,
 /// and the lock is released before the pixels are scaled and encoded.</item>
 /// <item>Decoded size above 256 MiB, or above 32768 pixels on a side, is <c>too_large</c> (413) and is checked from the header before any decode. A PNG above 16 MiB is <c>too_large</c> as well.</item>
 /// <item>Out of memory is 413 <c>too_large</c> and empties the cache, as in the loader.</item>
@@ -277,61 +277,119 @@ public sealed class ViewerCanvasService
     }
 
     /// <summary>
-    /// Metadata and pixel source of the canvas <paramref name="property"/> (a UOL is followed first). Holds one image's Sync at a
-    /// time: the one of the canvas to find the link target, then the target's own.
+    /// Metadata and pixel source of the canvas <paramref name="property"/> (a UOL is followed first). The link chain is walked one
+    /// step at a time and <b>every tree read holds the Sync of the image that tree belongs to, and only that one</b>:
+    /// <list type="bullet">
+    /// <item>an <c>_inlink</c> is looked up in the same image, under its lock;</item>
+    /// <item>an <c>_outlink</c> is split into image path and property path under the lock, then the other image is opened through
+    /// <see cref="ViewerLinkContext"/> with NO lock held (loading and parsing can take long, and other requests on the first image
+    /// must not wait for it), and the property is looked up in it under that image's own lock.</item>
+    /// </list>
+    /// The library's <c>GetLinkedWzImageProperty()</c> is deliberately not used: for an <c>_outlink</c> it loads the other image through
+    /// the static hook while the caller holds the lock, and then reads the other tree under the wrong lock.
     /// </summary>
     private CanvasSource? Describe(LoadedImage loaded, WzImageProperty property, ViewerLinkContext links, CancellationToken cancellationToken)
     {
-        WzCanvasProperty canvas;
-        WzImageProperty? target;
-        int? ownOriginX = null, ownOriginY = null, ownDelay;
+        int? ownOriginX, ownOriginY, ownDelay;
         bool viaOutlink = false;
         LoadedImage owner = loaded;
+        WzCanvasProperty canvas;
 
         lock (loaded.Sync)
         {
-            if (FollowUol(loaded.Image, property) is not WzCanvasProperty c)
+            if (FollowUol(loaded.Image, property) is not WzCanvasProperty first)
                 return null;
-            canvas = c;
+            canvas = first;
             (ownOriginX, ownOriginY) = OriginOf(canvas);
             ownDelay = DelayOf(canvas);
-
-            target = canvas;
-            for (int hop = 0; target is WzCanvasProperty linked && IsLinked(linked); hop++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (hop >= MaxLinkHops)
-                    return null;
-                if (linked[WzCanvasProperty.InlinkPropertyName] == null)
-                    viaOutlink = true;
-                var next = linked.GetLinkedWzImageProperty();   // an _outlink goes through ViewerLinkContext: this request's source only
-                if (ReferenceEquals(next, linked))
-                    return null;   // the link did not resolve
-                target = FollowUol(next.ParentImage ?? loaded.Image, next);
-            }
         }
-        if (target is not WzCanvasProperty final)
-            return null;
 
-        if (!ReferenceEquals(final.ParentImage, loaded.Image))
+        for (int hop = 0; ; hop++)
         {
-            var other = final.ParentImage == null ? null : links.LoadedFor(final.ParentImage);
-            if (other == null)
-                return null;   // not an image this request opened through the safe reader: never read it
-            owner = other;
+            cancellationToken.ThrowIfCancellationRequested();
+            string? inlink = null, outlink = null;
+            bool linked;
+            lock (owner.Sync)
+            {
+                linked = IsLinked(canvas);
+                if (linked)
+                {
+                    inlink = (canvas[WzCanvasProperty.InlinkPropertyName] as WzStringProperty)?.Value;
+                    outlink = (canvas[WzCanvasProperty.OutlinkPropertyName] as WzStringProperty)?.Value;
+                }
+            }
+            if (!linked)
+                break;
+            if (hop >= MaxLinkHops)
+                return null;
+
+            WzImageProperty? next;
+            LoadedImage nextOwner = owner;
+            if (!string.IsNullOrEmpty(inlink))
+            {
+                lock (owner.Sync)
+                    next = FollowUol(owner.Image, owner.Image.GetFromPath(inlink));   // the same image, the same lock
+            }
+            else if (!string.IsNullOrEmpty(outlink))
+            {
+                viaOutlink = true;
+                if (!TrySplitOutlink(outlink, out var imagePath, out var propertyPath))
+                    return null;
+                var other = links.LoadLinked(imagePath);   // no lock held: the hook may load and parse
+                nextOwner = other == null ? null! : links.LoadedFor(other)!;
+                if (nextOwner == null)
+                    return null;   // outside the rules, another source, missing, over the budget: never read
+                lock (nextOwner.Sync)
+                    next = FollowUol(nextOwner.Image, nextOwner.Image.GetFromPath(propertyPath));
+            }
+            else
+                return null;   // a link property without a usable text
+
+            if (next is not WzCanvasProperty nextCanvas)
+                return null;
+            canvas = nextCanvas;
+            owner = nextOwner;
         }
 
         lock (owner.Sync)
         {
-            var png = final.PngProperty;
+            var png = canvas.PngProperty;
             if (png == null)
                 return null;
             int width = png.Width, height = png.Height;
             if (width <= 0 || height <= 0)
                 return null;
-            var (tx, ty) = OriginOf(final);
-            return new CanvasSource(owner, png, width, height, ownOriginX ?? tx ?? 0, ownOriginY ?? ty ?? 0, ownDelay ?? DelayOf(final), viaOutlink);
+            var (tx, ty) = OriginOf(canvas);
+            return new CanvasSource(owner, png, width, height, ownOriginX ?? tx ?? 0, ownOriginY ?? ty ?? 0, ownDelay ?? DelayOf(canvas), viaOutlink);
         }
+    }
+
+    /// <summary>
+    /// Splits <c>Mob/8800141.img/8800141.png</c> into the image path (<c>Mob/8800141.img</c>) and the property path, as the library's
+    /// own outlink lookup does: the image ends at the first segment that ends with <c>.img</c>; backslashes in the image part are slashes.
+    /// </summary>
+    public static bool TrySplitOutlink(string outlink, out string imagePath, out string propertyPath)
+    {
+        imagePath = propertyPath = "";
+        var path = outlink.Trim().Trim('/');
+        int start = 0;
+        while (start < path.Length)
+        {
+            int slash = path.IndexOfAny(new[] { '/', '\\' }, start);
+            int end = slash < 0 ? path.Length : slash;
+            if (end - start >= 4 && string.Compare(path, end - 4, ".img", 0, 4, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                if (end + 1 >= path.Length)
+                    return false;   // an image without a property path
+                imagePath = path.Substring(0, end).Replace('\\', '/');
+                propertyPath = path.Substring(end + 1);
+                return true;
+            }
+            if (slash < 0)
+                break;
+            start = slash + 1;
+        }
+        return false;
     }
 
     private static bool IsLinked(WzCanvasProperty c)

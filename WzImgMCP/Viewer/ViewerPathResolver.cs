@@ -23,7 +23,10 @@ public sealed record ResolvedImage(string Source, string RelativePath, string Fu
 /// Turns (source name, relative image path such as <c>String/Consume.img</c>) into a file under that source's
 /// <c>img</c> folder, or throws a <see cref="ViewerApiException"/>: <c>unknown_source</c> (400), <c>bad_path</c> (400),
 /// <c>not_found</c> (404, the file is absent in a readable <c>img</c> folder) or <c>source_unavailable</c> (503, the
-/// <c>img</c> folder itself is missing or cannot be read, for instance a mount that is down; this is NOT "no such file").
+/// <c>img</c> folder itself is missing or cannot be read, or something on the way to the file cannot be examined (a folder
+/// that cannot be searched, an I/O error), for instance a mount that is down; this is NOT "no such file"). A source whose
+/// <c>img</c> folder does not exist is unavailable too, so a person who has no copy yet needs an empty <c>img</c> folder: an
+/// empty mount point looks exactly like a person without files, and answering "removed" for every file would hide the outage.
 ///
 /// The path must match a strict pattern before the file system is touched: only ASCII letters, digits, space,
 /// '_', '-', '.' and '/' as separator, no empty segment, no segment that starts with '.', last segment ends with
@@ -76,6 +79,12 @@ public class ViewerPathResolver
             for (int i = 0; i < segments.Length; i++)
             {
                 current = Path.Combine(current, segments[i]);
+                // "cannot say" (a folder that cannot be searched, an I/O error, a mount that does not answer) is not "absent"
+                var state = _fileSystem?.Probe(current) ?? PathState.Present;
+                if (state == PathState.Unavailable)
+                    throw SourceUnavailable();
+                if (state == PathState.Absent)
+                    throw new ViewerApiException(404, "not_found", "image not found");
                 if (new FileInfo(current).LinkTarget != null)
                     throw new ViewerApiException(400, "bad_path", "symbolic links are not allowed");
 
