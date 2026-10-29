@@ -685,7 +685,7 @@ public class ModifyTools
 
             // Get the file path from the data source
             var ds = _session.DataSource;
-            if (!ds.SaveImage(category, img))
+            if (!ds.SaveImage(category, img, image))
             {
                 return new SaveResult { Success = false, Error = $"Failed to save {category}/{image}; the file on disk was not changed" };
             }
@@ -695,7 +695,7 @@ public class ModifyTools
             // discard_changes) reads the file that was just written.
             if (ds is ImgFileSystemDataSource imgSource)
             {
-                imgSource.Manager.RemoveFromCache(category, img.Name);
+                imgSource.Manager.RemoveFromCache(category, image);
             }
 
             return new SaveResult

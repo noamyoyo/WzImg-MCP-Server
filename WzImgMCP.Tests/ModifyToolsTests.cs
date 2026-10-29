@@ -65,4 +65,34 @@ public class ModifyToolsTests : IClassFixture<TestFixture>
             discard.Contains("success: true", StringComparison.OrdinalIgnoreCase)
             || discard.Contains("error", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public void SaveImage_NestedImage_WritesBackToItsOwnPath()
+    {
+        var edit = _tools.SetString("Map", "Map0/000000000.img", "testString", "Nested edit");
+        MarkdownTestHelper.AssertSuccess(edit);
+
+        var save = _tools.SaveImage("Map", "Map0/000000000.img");
+        MarkdownTestHelper.AssertSuccess(save);
+
+        // No stray copy at the top of the category
+        Assert.False(File.Exists(Path.Combine(_fixture.TestDataPath, "Map", "000000000.img")));
+
+        // The real file holds the edit after a fresh read from disk
+        var reread = _fixture.Session.GetImage("Map", "Map0/000000000.img");
+        Assert.Equal("Nested edit", (reread["testString"] as MapleLib.WzLib.WzProperties.WzStringProperty)?.Value);
+    }
+
+    [Fact]
+    public void MarkImageUpdated_NestedImage_WritesBackToItsOwnPath()
+    {
+        var img = _fixture.Session.GetImage("Map", "Map0/000000000.img");
+        img.AddProperty(new MapleLib.WzLib.WzProperties.WzIntProperty("markedInt", 7));
+        img.Changed = true;
+
+        _fixture.Session.DataSource.MarkImageUpdated("Map", img);
+
+        Assert.False(File.Exists(Path.Combine(_fixture.TestDataPath, "Map", "000000000.img")));
+        Assert.True(File.Exists(Path.Combine(_fixture.TestDataPath, "Map", "Map0", "000000000.img")));
+    }
 }
