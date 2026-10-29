@@ -398,7 +398,7 @@ public sealed class ViewerHostTests : IAsyncLifetime
     public async Task UnknownRoute_Is404_Typed()
     {
         var s = await Start();
-        foreach (var url in new[] { "/", "/nope", "/v1", "/v1/diff?person=owner", "/v2/health" })
+        foreach (var url in new[] { "/", "/nope", "/v1", "/v1/difff?person=owner", "/v2/health" })
             await AssertError(await s.Get(url), HttpStatusCode.NotFound, "not_found");
     }
 

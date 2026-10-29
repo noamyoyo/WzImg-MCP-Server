@@ -17,6 +17,7 @@ public sealed class ViewerDiffEngineTests : IDisposable
     private readonly ViewerTree _tree = new();
     private readonly ViewerImageLoader _loader;
     private readonly ViewerPathResolver _resolver;
+    private int _counter;
 
     public ViewerDiffEngineTests()
     {
@@ -35,10 +36,12 @@ public sealed class ViewerDiffEngineTests : IDisposable
 
     private ImageDiffResult Diff(Action<WzImage> oldImage, Action<WzImage> newImage, DiffOptions? options = null)
     {
-        ImgFixture.Write(_tree.Root("canon"), "X.img", ImgFixture.Build(oldImage));
-        ImgFixture.Write(_tree.Root("owner"), "X.img", ImgFixture.Build(newImage));
-        using var a = _loader.Load(_resolver.Resolve("canon", "X.img"), CancellationToken.None);
-        using var b = _loader.Load(_resolver.Resolve("owner", "X.img"), CancellationToken.None);
+        // a new file name per call: the cache cannot tell a rewrite with the same size and mtime from the old file
+        var name = $"X{Interlocked.Increment(ref _counter)}.img";
+        ImgFixture.Write(_tree.Root("canon"), name, ImgFixture.Build(oldImage));
+        ImgFixture.Write(_tree.Root("owner"), name, ImgFixture.Build(newImage));
+        using var a = _loader.Load(_resolver.Resolve("canon", name), CancellationToken.None);
+        using var b = _loader.Load(_resolver.Resolve("owner", name), CancellationToken.None);
         return ImageDiffer.Diff(a.Loaded, b.Loaded, options ?? new DiffOptions(), CancellationToken.None);
     }
 
