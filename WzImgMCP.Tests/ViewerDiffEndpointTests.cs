@@ -468,7 +468,7 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
         var d = ViewerOptions.FromEnvironment(n => n == ViewerOptions.TokenEnvVar ? token : null);
         Assert.Equal((2000, 200, TimeSpan.FromSeconds(25)), (d.MaxChanges, d.MaxCanvasDecodes, d.DiffBudget));
 
-        var bad = ViewerOptions.FromEnvironment(n => n == ViewerOptions.TokenEnvVar ? token : "abc");
+        var bad = ViewerOptions.FromEnvironment(n => n == ViewerOptions.TokenEnvVar ? token : n == ViewerOptions.MaxRequestsEnvVar ? null : "abc");   // (WZ_VIEWER_MAX_REQUESTS is the one that refuses bad values)
         Assert.Equal((2000, 200, TimeSpan.FromSeconds(25)), (bad.MaxChanges, bad.MaxCanvasDecodes, bad.DiffBudget));
     }
 

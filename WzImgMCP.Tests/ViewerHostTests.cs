@@ -495,15 +495,15 @@ public sealed class ViewerHostTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task MoreThanFourConcurrentRequests_GetBusy()
+    public async Task MoreConcurrentRequestsThanTheCap_GetBusy()
     {
         var options = Options();
         var resolver = new GatedResolver(options.Roots);
         var s = await Start(options, resolver);
 
         const string url = "/v1/resolve?source=owner&path=String/Consume.img";
-        var inFlight = Enumerable.Range(0, 4).Select(_ => s.Get(url)).ToList();
-        for (int i = 0; i < 4; i++)
+        var inFlight = Enumerable.Range(0, options.MaxConcurrentRequests).Select(_ => s.Get(url)).ToList();
+        for (int i = 0; i < options.MaxConcurrentRequests; i++)
             Assert.True(await resolver.Entered.WaitAsync(TimeSpan.FromSeconds(30)), "request did not arrive");
 
         var busy = await s.Get(url);
@@ -525,8 +525,8 @@ public sealed class ViewerHostTests : IAsyncLifetime
         var resolver = new GatedResolver(options.Roots);
         var s = await Start(options, resolver);
 
-        var inFlight = Enumerable.Range(0, 4).Select(_ => s.Get("/v1/resolve?source=owner&path=String/Consume.img")).ToList();
-        for (int i = 0; i < 4; i++)
+        var inFlight = Enumerable.Range(0, options.MaxConcurrentRequests).Select(_ => s.Get("/v1/resolve?source=owner&path=String/Consume.img")).ToList();
+        for (int i = 0; i < options.MaxConcurrentRequests; i++)
             Assert.True(await resolver.Entered.WaitAsync(TimeSpan.FromSeconds(30)), "request did not arrive");
 
         await AssertError(await s.Get("/v1/resolve?source=owner&path=String/Consume.img"), HttpStatusCode.ServiceUnavailable, "busy");
@@ -552,7 +552,7 @@ public sealed class ViewerHostTests : IAsyncLifetime
         var resolver = new GatedResolver(options.Roots);
         var s = await Start(options, resolver);
 
-        var inFlight = Enumerable.Range(0, 4).Select(_ => s.Get("/v1/resolve?source=owner&path=String/Consume.img")).ToList();
+        var inFlight = Enumerable.Range(0, options.MaxConcurrentRequests).Select(_ => s.Get("/v1/resolve?source=owner&path=String/Consume.img")).ToList();
         for (int i = 0; i < 4; i++)
             Assert.True(await resolver.Entered.WaitAsync(TimeSpan.FromSeconds(30)));
 

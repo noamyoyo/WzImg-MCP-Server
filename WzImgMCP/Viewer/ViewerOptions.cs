@@ -21,7 +21,10 @@ public sealed class ViewerOptions
 
     public const string DefaultHost = "0.0.0.0";
     public const int DefaultPort = 13400;
-    public const int DefaultMaxConcurrentRequests = 4;
+    public const string MaxRequestsEnvVar = "WZ_VIEWER_MAX_REQUESTS";
+    public const int DefaultMaxConcurrentRequests = 8;
+    public const int MinConcurrentRequests = 1;
+    public const int MaxConcurrentRequestsLimit = 32;
     public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>The secret every request must carry in the <c>X-Viewer-Token</c> header (already trimmed).</summary>
@@ -33,7 +36,7 @@ public sealed class ViewerOptions
     /// <summary>Source name to root directory (full path). Each root holds an <c>img</c> folder with the extracted tree.</summary>
     public IReadOnlyDictionary<string, string> Roots { get; }
 
-    /// <summary>Requests that may run at the same time; the next one gets 503 <c>busy</c>.</summary>
+    /// <summary>Requests that may run at the same time (<c>WZ_VIEWER_MAX_REQUESTS</c>, 1 to 32, default 8); the next one gets 503 <c>busy</c>. Health is outside it; the decode cap (<see cref="MaxDecodes"/>) is separate.</summary>
     public int MaxConcurrentRequests { get; init; } = DefaultMaxConcurrentRequests;
 
     public const string MaxFileMbEnvVar = "WZ_VIEWER_MAX_FILE_MB";
@@ -129,6 +132,7 @@ public sealed class ViewerOptions
         }
         return new ViewerOptions(getEnv(TokenEnvVar), roots)
         {
+            MaxConcurrentRequests = ParseStrict(getEnv(MaxRequestsEnvVar), MaxRequestsEnvVar, DefaultMaxConcurrentRequests, MinConcurrentRequests, MaxConcurrentRequestsLimit),
             MaxFileBytes = ParseWhole(getEnv(MaxFileMbEnvVar), DefaultMaxFileMb, 1, 1024) * 1024L * 1024L,
             MaxDecodes = (int)ParseWhole(getEnv(MaxDecodesEnvVar), DefaultMaxDecodes, 1, 16),
             CacheBytes = ParseWhole(getEnv(CacheMbEnvVar), DefaultCacheMb, 0, 16384) * 1024L * 1024L,
@@ -140,6 +144,19 @@ public sealed class ViewerOptions
             MaxDiffResponseBytes = ParseWhole(getEnv(MaxDiffResponseKbEnvVar), DefaultMaxDiffResponseKb, 16, 262144) * 1024L,
             DiffBudget = TimeSpan.FromSeconds(ParseWhole(getEnv(DiffBudgetSecondsEnvVar), DefaultDiffBudgetSeconds, 1, 600)),
         };
+    }
+
+    /// <summary>
+    /// A whole number inside [min, max]; unset or blank gives the default, but anything else that is not such a number is a
+    /// configuration error (the viewer refuses to start, exit code 2) instead of a silent fallback.
+    /// </summary>
+    private static int ParseStrict(string? raw, string name, int fallback, int min, int max)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return fallback;
+        if (!int.TryParse(raw.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) || value < min || value > max)
+            throw new ViewerConfigException($"{name} must be a whole number from {min} to {max}.");
+        return value;
     }
 
     /// <summary>A whole number inside [min, max]; blank, not a number or out of range gives the default.</summary>
