@@ -7,6 +7,7 @@ using ModelContextProtocol.Server;
 using WzImgMCP.Server;
 using WzImgMCP.Tools;
 using WzImgMCP.Utils;
+using WzImgMCP.Viewer;
 
 namespace WzImgMCP;
 
@@ -15,6 +16,13 @@ class Program
     static async Task Main(string[] args)
     {
         ServerSettings.Apply();   // WZIMG_PRE_BIG_BANG: no DXT in the automatic format choice
+
+        // --viewer: the read-only viewer service. It has its own service graph (no MCP, no tools), see ViewerHost.
+        if (args.Any(a => a.Equals("--viewer", StringComparison.OrdinalIgnoreCase)))
+        {
+            await RunViewerServer(args);
+            return;
+        }
 
         // Parse transport mode from arguments
         var transport = ParseTransportMode(args);
@@ -123,6 +131,13 @@ class Program
         await app.RunAsync();
     }
 
+    private static async Task RunViewerServer(string[] args)
+    {
+        var host = ParseHost(args, ViewerOptions.DefaultHost);
+        var port = ParsePort(args, ViewerOptions.DefaultPort);
+        Environment.ExitCode = await ViewerHost.RunAsync(args, host, port, Environment.GetEnvironmentVariable);
+    }
+
     private static TransportMode ParseTransportMode(string[] args)
     {
         for (int i = 0; i < args.Length; i++)
@@ -169,7 +184,7 @@ class Program
     /// Address the HTTP transport binds to. Defaults to localhost; set --host 0.0.0.0 (or the
     /// WZIMG_HOST environment variable) to listen on all interfaces, e.g. inside a container.
     /// </summary>
-    private static string ParseHost(string[] args)
+    private static string ParseHost(string[] args, string defaultHost = "localhost")
     {
         for (int i = 0; i < args.Length; i++)
         {
@@ -181,10 +196,10 @@ class Program
         }
 
         var fromEnv = Environment.GetEnvironmentVariable("WZIMG_HOST");
-        return string.IsNullOrWhiteSpace(fromEnv) ? "localhost" : fromEnv;
+        return string.IsNullOrWhiteSpace(fromEnv) ? defaultHost : fromEnv;
     }
 
-    private static int ParsePort(string[] args)
+    private static int ParsePort(string[] args, int defaultPort = 13339)
     {
         for (int i = 0; i < args.Length; i++)
         {
@@ -213,7 +228,7 @@ class Program
         }
 
         // Default port
-        return 13339;
+        return defaultPort;
     }
 
     private enum TransportMode
