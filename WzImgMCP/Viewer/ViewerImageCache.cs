@@ -29,6 +29,9 @@ public sealed class LoadedImage
     /// </summary>
     public object Sync { get; } = new();
 
+    /// <summary>True once the last reference is gone and the image has been disposed.</summary>
+    public bool Disposed => Volatile.Read(ref _references) <= 0;
+
     public LoadedImage(ImageKey key, WzImage image, string keyUsed, long parseMillis, long fileBytes, long cost)
     {
         Key = key;
