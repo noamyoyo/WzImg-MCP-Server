@@ -94,5 +94,11 @@ public class ModifyToolsTests : IClassFixture<TestFixture>
 
         Assert.False(File.Exists(Path.Combine(_fixture.TestDataPath, "Map", "000000000.img")));
         Assert.True(File.Exists(Path.Combine(_fixture.TestDataPath, "Map", "Map0", "000000000.img")));
+
+        // The nested file really holds the edit: read it with a separate session, so nothing comes from the cache.
+        using var other = new WzImgMCP.Server.WzSessionManager();
+        other.InitDataSource(_fixture.TestDataPath);
+        var reread = other.GetImage("Map", "Map0/000000000.img");
+        Assert.Equal(7, (reread["markedInt"] as MapleLib.WzLib.WzProperties.WzIntProperty)?.Value);
     }
 }

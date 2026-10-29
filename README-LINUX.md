@@ -157,6 +157,17 @@ has been idle for `IdleTimeout`. Facts from the library code:
 - `MaxIdleSessionCount` is set to 100000 (the library default). Above that number the oldest idle sessions are closed even if
   they are younger than the timeout.
 
+### save_image and the image cache
+
+An image remembers the full path it was loaded from (`ImgFileSystemManager` keeps it in a `ConditionalWeakTable`).
+`save_image` writes to exactly that file, whatever spelling of the name is used in the call (`map0/x.img`, `Map0/x`,
+`Map0/../Map0/x.img`). The cache key is built from that same full path, so all those spellings share one cached image.
+If that file or its folder has been removed while the image was loaded, `save_image` fails with an error and writes nothing
+(no file or folder is recreated); the same happens for a symbolic link in the path, a read-only folder or any other failed
+write (`success: false`, the file on disk unchanged). After a successful save every cache entry of the image is dropped, so
+the next access reads the file that was written. Images with unsaved edits are never evicted from the cache (the cache may
+grow past its size limit) and survive `clear_cache`; `save_image` or `discard_changes` ends that.
+
 ## Security notes
 
 - **`PathGuard` (`WZIMG_ALLOWED_ROOT`) is not a chroot or a sandbox.** It checks the path arguments the tools
@@ -339,7 +350,8 @@ combined path against the version directory (lexically, symbolic links inside th
   built without `LINUX_BUILD` against System.Drawing.Common), never run; the Windows build of the whole solution could
   not be built here. The changes to MapleLib's encoders keep the same `LockBits` call on Windows but were not run
   there.
-- Tests on Linux: 408 tests (159 before the first review fixes, 268 before the second, 357 before the third, 394 before the fourth, 404 before the fifth step, 407 now); with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
+- Tests on Linux: 464 tests (159 before the first review fixes, 268 before the second, 357 before the third, 394 before the fourth, 404 before the fifth step, 410 before the session, auto-open and save_image changes, 464 now). Measured with `WZIMG_TEST_WZ_PATH` pointing at String.wz and Morph.wz only: 459 pass, 5 skip; without the variable 438 pass, 26 skip. The figures in the next sentences are from the earlier four-file run:
+  with `WZIMG_TEST_WZ_PATH` pointing at String.wz, Morph.wz, Ui.wz and Etc.wz,
   405 pass, 0 fail, 3 skip (the three upstream `IntegrationTests` that need a Windows data path). With only String.wz
   and Morph.wz 403 pass and 5 skip; without the variable 382 pass and 26 skip. Tests that need symbolic links are reported as
   skipped (not passed) where links cannot be created. All 29 upstream tests that failed in

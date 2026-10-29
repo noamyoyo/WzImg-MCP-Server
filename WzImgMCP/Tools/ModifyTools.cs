@@ -683,19 +683,14 @@ public class ModifyTools
         {
             var img = _session.GetImage(category, image);
 
-            // Get the file path from the data source
+            // The data source saves the image to the file it was read from (recorded when it was loaded), whatever
+            // spelling of the name was used here. It refuses when that file is gone, never creates folders, and on
+            // success drops every cache entry of the image so the next access reads the file that was just written
+            // (the in-memory image still points at the old offsets).
             var ds = _session.DataSource;
-            if (!ds.SaveImage(category, img, image))
+            if (!ds.SaveImage(category, img))
             {
                 return new SaveResult { Success = false, Error = $"Failed to save {category}/{image}; the file on disk was not changed" };
-            }
-
-            // The in-memory image still points at the file it was read from, whose offsets are now stale.
-            // Drop it from the cache so the next access (including after unparse_image or
-            // discard_changes) reads the file that was just written.
-            if (ds is ImgFileSystemDataSource imgSource)
-            {
-                imgSource.Manager.RemoveFromCache(category, image);
             }
 
             return new SaveResult
