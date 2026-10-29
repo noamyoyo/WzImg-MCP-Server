@@ -13,7 +13,10 @@ public sealed class ScanTestTree : IDisposable
 {
     public const string Category = "Mob";
 
-    public string Path { get; } = Directory.CreateTempSubdirectory("wzimg-scan-").FullName;
+    /// <summary>The tree. It is the only child of a folder of its own (see <see cref="_sandbox"/>).</summary>
+    public string Path { get; }
+
+    private readonly string _sandbox = Directory.CreateTempSubdirectory("wzimg-scan-").FullName;
     public int ImageCount { get; }
 
     /// <summary>Relative paths of the images as the category listing returns them (with "/"), ordinal order.</summary>
@@ -22,6 +25,8 @@ public sealed class ScanTestTree : IDisposable
     public ScanTestTree(int imageCount = 30, int propertiesPerImage = 4)
     {
         ImageCount = imageCount;
+        Path = System.IO.Path.Combine(_sandbox, "tree");
+        Directory.CreateDirectory(Path);
         File.WriteAllText(System.IO.Path.Combine(Path, "manifest.json"), "{\"version\":\"1\",\"displayName\":\"Scan test\"}");
         string root = System.IO.Path.Combine(Path, Category);
         Directory.CreateDirectory(System.IO.Path.Combine(root, "Sub"));
@@ -73,6 +78,6 @@ public sealed class ScanTestTree : IDisposable
 
     public void Dispose()
     {
-        try { Directory.Delete(Path, true); } catch { }
+        try { Directory.Delete(_sandbox, true); } catch { }
     }
 }

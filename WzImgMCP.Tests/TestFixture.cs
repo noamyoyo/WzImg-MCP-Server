@@ -17,10 +17,16 @@ public class TestFixture : IDisposable
     public string TestDataPath { get; }
     public WzSessionManager Session { get; }
 
+    /// <summary>
+    /// The fixture's own folder: the data tree is its only child "data", so a test that looks at the parent of the tree sees nothing
+    /// that another test (running in parallel) creates in the system temp folder.
+    /// </summary>
+    private readonly string _sandbox = Directory.CreateTempSubdirectory("HaMCP_Test_").FullName;
+
     public TestFixture()
     {
         // Create temp directory for test data
-        TestDataPath = Path.Combine(Path.GetTempPath(), $"HaMCP_Test_{Guid.NewGuid():N}");
+        TestDataPath = Path.Combine(_sandbox, "data");
         Directory.CreateDirectory(TestDataPath);
 
         // Create a minimal IMG filesystem structure
@@ -194,9 +200,9 @@ public class TestFixture : IDisposable
         // Clean up test data
         try
         {
-            if (Directory.Exists(TestDataPath))
+            if (Directory.Exists(_sandbox))
             {
-                Directory.Delete(TestDataPath, true);
+                Directory.Delete(_sandbox, true);
             }
         }
         catch
