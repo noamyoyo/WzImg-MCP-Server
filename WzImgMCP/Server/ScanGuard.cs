@@ -157,9 +157,11 @@ public static class ScanGuard
     /// (image, category, name to show); the visitor returns true to stop. At least one image is always scanned; after that the
     /// time budget (when there is one) is checked before each image. An image that was not cached is disposed after its visit;
     /// a cached image is visited under its lock and left exactly as it is (never unparsed or disposed). A bulk tool that works through a
-    /// whole category on purpose passes <paramref name="applyBudget"/> false.
+    /// whole category on purpose passes <paramref name="applyBudget"/> false. <paramref name="cancellationToken"/> (the MCP request's)
+    /// is checked before every image; the visitors check it again inside an image, so one huge image does not run on after the client left.
     /// </summary>
-    public static ScanOutcome Run(WzSessionManager session, ScanPlan plan, Func<WzImage, string, string, bool> visit, bool applyBudget = true)
+    public static ScanOutcome Run(WzSessionManager session, ScanPlan plan, Func<WzImage, string, string, bool> visit, bool applyBudget = true,
+        CancellationToken cancellationToken = default)
     {
         var source = session.ImgSource;
         var budget = applyBudget ? session.ScanLimits.Budget : TimeSpan.Zero;
@@ -169,6 +171,8 @@ public static class ScanGuard
 
         foreach (var item in plan.Items)
         {
+            // The client gave up (the MCP request was cancelled or timed out): stop before the next image is opened.
+            cancellationToken.ThrowIfCancellationRequested();
             if (budget > TimeSpan.Zero && scanned + failed > 0 && clock.Elapsed >= budget)
             {
                 budgetExhausted = true;
@@ -213,7 +217,7 @@ public static class ScanGuard
                 if (stopped)
                     break;
             }
-            catch (ToolErrorException)
+            catch (Exception ex) when (ex is ToolErrorException or OperationCanceledException)
             {
                 throw;
             }

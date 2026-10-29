@@ -213,7 +213,7 @@ category index; if there are more than `WZIMG_SCAN_MAX_IMAGES` the call fails wi
 says how many images the category has and suggests `image` or a paged `list_images_in_category`. Otherwise the images are scanned
 one after the other under the time budget (`WZIMG_SCAN_BUDGET_SECONDS`; at least one image is always scanned). The result carries
 `scanned_images` and `total_images`, and `truncated: true` with `truncated_reason` (`max_results` or `time_budget`) when it is partial.
-A category given without an image is `category_required`. An image the scan has to load is read, parsed, searched and **disposed**:
+The MCP request's cancellation token (a client that timed out) is checked before every image and inside every image while it is walked, by the search tools, `find_broken_uols`, `batch_search`, `get_category_summary` with `detailed=true`, `preload_category` and `batch_export_images`; a cancelled call stops at once and opens no further image. A category given without an image is `category_required`. An image the scan has to load is read, parsed, searched and **disposed**:
 it never enters the cache, so a scan leaves the cache and its hit and miss counters as they were. An image that is already cached
 (this includes every image with unsaved edits, which a scan therefore sees as edited) is used as it is and not touched.
 

@@ -202,7 +202,8 @@ public class BatchTools
         [Description("Output directory")] string outputDir,
         [Description("Output format (png, jpg)")] string format = "png",
         [Description("Maximum images to export")] int maxImages = 1000,
-        [Description("Export even when the categories hold more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false)
+        [Description("Export even when the categories hold more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false,
+        CancellationToken cancellationToken = default)
     {
         if (!_session.BeginToolCall())
         {
@@ -270,14 +271,14 @@ public class BatchTools
                             PathGuard.SanitizeFileName(Path.GetFileNameWithoutExtension(img.Name), "image"), imageDirNames));
                         ExportCanvasesFromImage(img, imageDir, extension, exported, failed, ref totalExported, maxImages);
                     }
-                    catch (PathNotAllowedException) { throw; }
+                    catch (Exception ex) when (ex is PathNotAllowedException or OperationCanceledException) { throw; }
                     catch (Exception ex)
                     {
                         failed.Add($"{category}/{name}: {ex.Message}");
                     }
 
                     return totalExported >= maxImages;
-                }, applyBudget: false);
+                }, applyBudget: false, cancellationToken: cancellationToken);
 
                 if (scan.Failed > 0)
                     failed.Add($"{category}: {scan.Failed} image(s) could not be read");
@@ -305,7 +306,8 @@ public class BatchTools
         [Description("Search pattern (supports wildcards)")] string pattern,
         [Description("Categories to search (comma-separated, or 'all')")] string categories = "all",
         [Description("Search type: name, value, or both")] string searchType = "name",
-        [Description("Maximum results (default: 30)")] int maxResults = 30)
+        [Description("Maximum results (default: 30)")] int maxResults = 30,
+        CancellationToken cancellationToken = default)
     {
         if (!_session.BeginToolCall())
         {
@@ -336,7 +338,11 @@ public class BatchTools
             {
                 try
                 {
-                    SearchInImage(img, category, name, regex, searchType, results, maxResults);
+                    SearchInImage(img, category, name, regex, searchType, results, maxResults, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
                 }
                 catch
                 {
@@ -344,7 +350,7 @@ public class BatchTools
                 }
 
                 return results.Count >= maxResults;
-            });
+            }, cancellationToken: cancellationToken);
 
             return new BatchSearchResult
             {
@@ -431,17 +437,18 @@ public class BatchTools
     }
 
     private void SearchInImage(MapleLib.WzLib.WzImage img, string category, string imageName,
-        System.Text.RegularExpressions.Regex regex, string searchType, List<BatchSearchMatch> results, int max)
+        System.Text.RegularExpressions.Regex regex, string searchType, List<BatchSearchMatch> results, int max, CancellationToken ct)
     {
         foreach (var prop in img.WzProperties ?? Enumerable.Empty<MapleLib.WzLib.WzImageProperty>())
         {
-            SearchInProperty(prop, category, imageName, "", regex, searchType, results, max);
+            SearchInProperty(prop, category, imageName, "", regex, searchType, results, max, ct);
         }
     }
 
     private void SearchInProperty(MapleLib.WzLib.WzImageProperty prop, string category, string imageName,
-        string path, System.Text.RegularExpressions.Regex regex, string searchType, List<BatchSearchMatch> results, int max)
+        string path, System.Text.RegularExpressions.Regex regex, string searchType, List<BatchSearchMatch> results, int max, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (results.Count >= max) return;
 
         var currentPath = string.IsNullOrEmpty(path) ? prop.Name : $"{path}/{prop.Name}";
@@ -482,7 +489,7 @@ public class BatchTools
         // Recurse
         foreach (var child in prop.WzProperties ?? Enumerable.Empty<MapleLib.WzLib.WzImageProperty>())
         {
-            SearchInProperty(child, category, imageName, currentPath, regex, searchType, results, max);
+            SearchInProperty(child, category, imageName, currentPath, regex, searchType, results, max, ct);
         }
     }
 

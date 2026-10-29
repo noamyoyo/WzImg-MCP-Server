@@ -494,6 +494,80 @@ public sealed class ScanGuardTests : IDisposable
         Assert.Equal(0, Stats.CachedImageCount);
     }
 
+    // ---- cancellation: the MCP request was cancelled (the client timed out)
+
+    /// <summary>A sub property that cancels a token the first time its name is read: the cancellation happens inside an image.</summary>
+    private sealed class CancelOnNameSub : WzSubProperty
+    {
+        private readonly CancellationTokenSource _cts;
+        public CancelOnNameSub(string name, CancellationTokenSource cts) : base(name) => _cts = cts;
+        public override string Name
+        {
+            get { _cts.Cancel(); return base.Name; }
+            set => base.Name = value;
+        }
+    }
+
+    [Fact]
+    public void Scan_StopsBeforeTheNextImage_WhenTheRequestIsCancelled()
+    {
+        var plan = ScanGuard.PlanCategories(_session, new[] { ScanTestTree.Category }, 1000, "x", "");
+        using var cts = new CancellationTokenSource();
+        int visited = 0;
+
+        Assert.Throws<OperationCanceledException>(() => ScanGuard.Run(_session, plan, (img, cat, name) =>
+        {
+            if (++visited == 3)
+                cts.Cancel();
+            return false;
+        }, cancellationToken: cts.Token));
+
+        Assert.Equal(3, visited);                             // the third image was finished, the fourth never opened
+        Assert.Equal(3, Stats.DiskReadCount);
+        Assert.Equal(0, Stats.CachedImageCount);              // and the copies it had loaded were disposed, not cached
+    }
+
+    [Fact]
+    public void Scan_OfACancelledRequest_OpensNothing()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        foreach (var result in new[]
+        {
+            new NavigationTools(_session).SearchByName("name", ScanTestTree.Category, cancellationToken: cts.Token),
+            new NavigationTools(_session).SearchByValue("needle", category: ScanTestTree.Category, cancellationToken: cts.Token),
+            new AnalysisTools(_session).FindBrokenUols(ScanTestTree.Category, cancellationToken: cts.Token),
+            new AnalysisTools(_session).GetCategorySummary(ScanTestTree.Category, detailed: true, cancellationToken: cts.Token),
+            new BatchTools(_session).BatchSearch("name", ScanTestTree.Category, cancellationToken: cts.Token),
+            new BatchTools(_session).BatchExportImages(ScanTestTree.Category, Path.Combine(_tree.Path, "out"), cancellationToken: cts.Token),
+            new LifecycleTools(_session).PreloadCategory(ScanTestTree.Category, cancellationToken: cts.Token),
+        })
+        {
+            MarkdownTestHelper.AssertFailure(result);
+            Assert.Contains("canceled", Value(result, "error"));
+        }
+        AssertNothingOpened();
+    }
+
+    [Fact]
+    public void Search_OfOneHugeImage_ObservesTheCancellationInsideTheImage()
+    {
+        using var cts = new CancellationTokenSource();
+        var image = _session.GetImage(ScanTestTree.Category, "m001.img");     // cached: the scan walks this very object
+        var probe = new CancelOnNameSub("probe", cts);
+        probe.AddProperty(new WzIntProperty("inner", 1));
+        image.AddProperty(probe);
+        image.AddProperty(new WzStringProperty("name-after-the-probe", "x"));
+        image.Changed = true;
+
+        var result = new NavigationTools(_session).SearchByName("*after*", ScanTestTree.Category, "m001.img", cancellationToken: cts.Token);
+
+        // The first image is always read; without a check inside the image the walk would go on to the sibling and succeed.
+        MarkdownTestHelper.AssertFailure(result);
+        Assert.Contains("canceled", Value(result, "error"));
+    }
+
     // ---- the cache limit and the new cache statistics
 
     [Fact]

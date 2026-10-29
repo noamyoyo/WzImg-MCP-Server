@@ -115,7 +115,8 @@ public class NavigationTools : ToolBase
         [Description("Category to search in; every image of it is searched, so it may have at most 150 images (required unless image is given)")] string? category = null,
         [Description("Path of one image inside the category, as list_images_in_category shows it (e.g. 'Map1/000010000.img'); searches only that image, whatever the size of the category")] string? image = null,
         [Description("Maximum results to return (default: 20, max: 200)")] int maxResults = 20,
-        [Description("Return compact format with paths only (default: true)")] bool compact = true)
+        [Description("Return compact format with paths only (default: true)")] bool compact = true,
+        CancellationToken cancellationToken = default)
     {
         return Execute(() =>
         {
@@ -128,9 +129,9 @@ public class NavigationTools : ToolBase
             var plan = ScanGuard.PlanSearch(Session, category, image, "search_by_name");
             var scan = ScanGuard.Run(Session, plan, (img, cat, name) =>
             {
-                SearchInObject(img, cat, name, "", regex, results, maxResults, compact);
+                SearchInObject(img, cat, name, "", regex, results, maxResults, compact, cancellationToken);
                 return results.Count >= maxResults;
-            });
+            }, cancellationToken: cancellationToken);
 
             return ToSearchData(pattern, results, maxResults, scan);
         });
@@ -143,7 +144,8 @@ public class NavigationTools : ToolBase
         [Description("Category to search in; every image of it is searched, so it may have at most 150 images (required unless image is given)")] string? category = null,
         [Description("Path of one image inside the category, as list_images_in_category shows it (e.g. 'Map1/000010000.img'); searches only that image, whatever the size of the category")] string? image = null,
         [Description("Maximum results to return (default: 20, max: 200)")] int maxResults = 20,
-        [Description("Return compact format with paths only (default: true)")] bool compact = true)
+        [Description("Return compact format with paths only (default: true)")] bool compact = true,
+        CancellationToken cancellationToken = default)
     {
         return Execute(() =>
         {
@@ -155,9 +157,9 @@ public class NavigationTools : ToolBase
             var plan = ScanGuard.PlanSearch(Session, category, image, "search_by_value");
             var scan = ScanGuard.Run(Session, plan, (img, cat, name) =>
             {
-                SearchByValueInObject(img, cat, name, "", value, type, results, maxResults, compact);
+                SearchByValueInObject(img, cat, name, "", value, type, results, maxResults, compact, cancellationToken);
                 return results.Count >= maxResults;
-            });
+            }, cancellationToken: cancellationToken);
 
             return ToSearchData(value, results, maxResults, scan);
         });
@@ -205,8 +207,9 @@ public class NavigationTools : ToolBase
     #region Helper Methods
 
     private void SearchByValueInObject(WzObject obj, string category, string imageName, string path,
-        string searchValue, string? typeFilter, List<SearchMatch> results, int maxResults, bool compact)
+        string searchValue, string? typeFilter, List<SearchMatch> results, int maxResults, bool compact, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (results.Count >= maxResults) return;
 
         foreach (var child in GetChildren(obj))
@@ -220,7 +223,7 @@ public class NavigationTools : ToolBase
                     !prop.PropertyType.ToString().Equals(typeFilter, StringComparison.OrdinalIgnoreCase))
                 {
                     if (HasChildren(child))
-                        SearchByValueInObject(child, category, imageName, childPath, searchValue, typeFilter, results, maxResults, compact);
+                        SearchByValueInObject(child, category, imageName, childPath, searchValue, typeFilter, results, maxResults, compact, ct);
                     continue;
                 }
 
@@ -240,7 +243,7 @@ public class NavigationTools : ToolBase
             }
 
             if (HasChildren(child))
-                SearchByValueInObject(child, category, imageName, childPath, searchValue, typeFilter, results, maxResults, compact);
+                SearchByValueInObject(child, category, imageName, childPath, searchValue, typeFilter, results, maxResults, compact, ct);
         }
     }
 
@@ -257,8 +260,9 @@ public class NavigationTools : ToolBase
     };
 
     private void SearchInObject(WzObject obj, string category, string imageName, string path,
-        Regex pattern, List<SearchMatch> results, int maxResults, bool compact)
+        Regex pattern, List<SearchMatch> results, int maxResults, bool compact, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (results.Count >= maxResults) return;
 
         foreach (var child in GetChildren(obj))
@@ -279,7 +283,7 @@ public class NavigationTools : ToolBase
             }
 
             if (HasChildren(child))
-                SearchInObject(child, category, imageName, childPath, pattern, results, maxResults, compact);
+                SearchInObject(child, category, imageName, childPath, pattern, results, maxResults, compact, ct);
         }
     }
 

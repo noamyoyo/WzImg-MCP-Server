@@ -125,7 +125,8 @@ public class LifecycleTools
     [McpServerTool(Name = "preload_category"), Description("Preload the images of a category into the cache. Stops when the cache is full (WZIMG_CACHE_MB, default 400) or the managed heap is above WZIMG_MEMORY_SOFT_LIMIT_MB; refused above WZIMG_BULK_MAX_IMAGES (default 2000) images unless force is set.")]
     public string PreloadCategory(
         [Description("Category name")] string category,
-        [Description("Preload even when the category holds more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false)
+        [Description("Preload even when the category holds more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false,
+        CancellationToken cancellationToken = default)
     {
         if (!_session.BeginToolCall())
         {
@@ -146,6 +147,7 @@ public class LifecycleTools
             bool cacheFull = false, memoryLimit = false;
             foreach (var path in paths)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 _session.Touch();
                 if (_session.MemoryGuard.IsOverSoftLimit())
                 {

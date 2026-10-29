@@ -81,7 +81,8 @@ public class AnalysisTools
         [Description("Category name")] string category,
         [Description("Also count properties, canvases and sounds per image (opens the images; default: false)")] bool detailed = false,
         [Description("Maximum images to list (default: 200, max: 1000)")] int limit = Paging.DefaultLimit,
-        [Description("Number of images to skip (default: 0)")] int offset = 0)
+        [Description("Number of images to skip (default: 0)")] int offset = 0,
+        CancellationToken cancellationToken = default)
     {
         if (!_session.BeginToolCall())
         {
@@ -129,7 +130,7 @@ public class AnalysisTools
                     canvases += summary.CanvasCount.Value;
                     sounds += summary.SoundCount.Value;
                     return false;
-                });
+                }, cancellationToken: cancellationToken);
                 propertyCount = props;
                 canvasCount = canvases;
                 soundCount = sounds;
@@ -167,7 +168,8 @@ public class AnalysisTools
     public string FindBrokenUols(
         [Description("Category to check; every image of it is opened, so it may have at most 150 images (required unless image is given)")] string? category = null,
         [Description("Path of one image inside the category, as list_images_in_category shows it; checks only that image, whatever the size of the category")] string? image = null,
-        [Description("Maximum results to return (default: 30)")] int maxResults = 30)
+        [Description("Maximum results to return (default: 30)")] int maxResults = 30,
+        CancellationToken cancellationToken = default)
     {
         if (!_session.BeginToolCall())
         {
@@ -181,9 +183,9 @@ public class AnalysisTools
             var plan = ScanGuard.PlanSearch(_session, category, image, "find_broken_uols");
             var scan = ScanGuard.Run(_session, plan, (img, cat, name) =>
             {
-                FindBrokenUolsRecursive(img, cat, name, "", brokenUols, maxResults);
+                FindBrokenUolsRecursive(img, cat, name, "", brokenUols, maxResults, cancellationToken);
                 return brokenUols.Count >= maxResults;
-            });
+            }, cancellationToken: cancellationToken);
 
             return new BrokenUolsResult
             {
@@ -403,8 +405,9 @@ public class AnalysisTools
     }
 
     private void FindBrokenUolsRecursive(WzObject obj, string category, string imageName, string path,
-        List<BrokenUol> results, int maxResults)
+        List<BrokenUol> results, int maxResults, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (results.Count >= maxResults) return;
 
         IEnumerable<WzImageProperty>? children = null;
@@ -453,7 +456,7 @@ public class AnalysisTools
             {
                 if (results.Count >= maxResults) return;
                 var childPath = string.IsNullOrEmpty(path) ? child.Name : $"{path}/{child.Name}";
-                FindBrokenUolsRecursive(child, category, imageName, childPath, results, maxResults);
+                FindBrokenUolsRecursive(child, category, imageName, childPath, results, maxResults, ct);
             }
         }
     }
