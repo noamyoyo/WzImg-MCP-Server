@@ -259,8 +259,14 @@ WZIMG_CALIBRATION_DATA=/path/to/extracted/img/tree dotnet test WzImgMCP.Tests -p
 
 It loads up to `WZIMG_CALIBRATION_IMAGES` (default 300) images per category and prints heap growth / estimate per category; it
 skips when `WZIMG_CALIBRATION_DATA` is not set and fails only when a category is off by more than a factor of 2 either way.
-Payloads that are read later (a canvas bitmap, a sound) are counted only while they are held, so the guard above looks at the real
-heap as well.
+The cache counts an image's size once, when the image is added. That stays right because no read tool keeps a payload in the image:
+`get_canvas_bitmap`, `view_canvas`, `get_animation_frames`, `resolve_canvas_link`, `export_png`, `export_all_images`,
+`get_sound_info`, `get_sound_data`, `export_mp3` and `export_all_sounds` read canvases and sounds with `saveInMemory=false`, and the
+Linux build has no GDI+ bitmap to keep. `CanvasAccountingTests` calls each of these on a cached image with canvases and a sound and
+checks that its estimate does not change (and, as a control, that the estimate does grow when a payload is kept), so a change that
+starts keeping payloads fails the test. What the count does not follow is the growth of an image while it is being edited (added
+properties, an imported canvas or sound): such an image has unsaved edits, so the cache never evicts it, and the memory guard's soft
+limit looks at the real heap.
 
 The Dockerfile sets `DOTNET_gcServer=0` (workstation GC: one heap, not one per core) and `DOTNET_GCConserveMemory=5` (compact the
 large object heap more eagerly). The second value is **unmeasured**: it was chosen by reasoning, not compared with other values
