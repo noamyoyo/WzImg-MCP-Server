@@ -252,6 +252,66 @@ Safety notes:
 - The log has one line per request: method, route template, status, duration. Never the query string, a header or the token.
 - Like the editors it has no TLS. Keep it on a private Docker network and do not publish its port.
 
+## Packer mode
+
+`WzImgMCP.dll --packer [--host 0.0.0.0] [--port 13500]` starts a third service of the same image: it packs one category of a
+person's extracted copy into a `.wz` and checks the result by extracting it again. It belongs to the publish flow of the WZ
+editing page (the publisher asks the packer to pack, then to verify, and takes the file from the outbox). It is a plain
+ASP.NET minimal API modelled on the viewer: no MCP, no tool class, no session manager, only the four routes below, a token on every
+request. Packing calls the library (`WzPackingService`, the code behind the `pack_to_wz` tool), with wz version `83` and key `GMS`.
+
+The image's default entrypoint is `dotnet WzImgMCP.dll --http --port 13339`, and the first `--port` wins, so replace the entrypoint
+(`--entrypoint dotnet` and the arguments `WzImgMCP.dll --packer --host 0.0.0.0 --port 13500`), do not append to it.
+
+```
+docker run --rm --read-only --tmpfs /tmp:size=4g --cap-drop ALL --security-opt no-new-privileges:true --memory 4g -u 1000:100 \
+  --network wzimg-publisher_net \                       # an --internal network: the packer needs no way out
+  -v /srv/skyms-work/wz-edit/canon:/data/canon:ro -v /srv/skyms-work/wz-edit/owner:/data/owner:ro -v /srv/skyms-work/wz-edit/friend:/data/friend:ro \
+  -v /srv/skyms-work/packer-outbox:/outbox \
+  -e WZ_PACKER_TOKEN=... -e WZ_PACKER_ROOT_CANON=/data/canon -e WZ_PACKER_ROOT_OWNER=/data/owner -e WZ_PACKER_ROOT_FRIEND=/data/friend \
+  -e WZ_PACKER_OUTBOX=/outbox \
+  --entrypoint dotnet wzimg-mcp:linux-phase2 WzImgMCP.dll --packer --host 0.0.0.0 --port 13500
+```
+
+| Name | Meaning |
+| --- | --- |
+| `WZ_PACKER_TOKEN` | **Required**, same rules as `WZ_VIEWER_TOKEN` (at least 32 printable ASCII characters, no spaces; startup fails with exit code 2 otherwise). Every request, `/v1/health` included, needs it in the `X-Packer-Token` header (constant-time compare), else 401 `unauthorized`. Use a value of its own: the viewer's header is not accepted. |
+| `WZ_PACKER_ROOT_CANON`, `_OWNER`, `_FRIEND` | The trees, read only. Defaults `/data/canon`, `/data/owner`, `/data/friend`; each holds an `img` folder (`<root>/img/String/Pet.img`, optionally `<root>/img/manifest.json`). Mount them `:ro`. The canon root is configured and reported by `/v1/health`; this version does not read canon otherwise. |
+| `WZ_PACKER_OUTBOX` | **Required**, an absolute path of an existing folder (not a symbolic link) the process can create folders in, and not inside or around a root. The only writable place: `<outbox>/<jobId>/<Category>.wz` and `<outbox>/<jobId>/job.json`. Checked at start (exit code 2, no path in the message). |
+| `WZ_PACKER_TMP` | Where verify extracts the `.wz` again (a folder of its own per verify, removed at the end). Default: the system temp folder (the container's tmpfs). |
+| `WZ_PACKER_MAX_INPUT_MB` | Most bytes of `.img` files one pack reads, default `4096` (1 to 65536). Over it the job fails with `input_too_large`. |
+| `WZ_PACKER_MAX_WZ_MB` | Largest `.wz` a pack may produce, default `1024` (1 to 16384). Over it the file is discarded and the job fails with `output_too_large`. |
+| `WZ_PACKER_MAX_IMAGES` | Most `.img` files in one category, default `200000`. Over it: `too_many_images`. |
+| `WZ_PACKER_MAX_IMG_MB` | Largest single `.img` that verify reads, default `64` (1 to 1024; the viewer's cap). A bigger file is reported by verify as `unreadable`. |
+| `WZ_PACKER_TIME_BUDGET_SECONDS` | Wall-clock time one pack, and one verify, may take, default `900` (10 to 14400). A pack that runs over fails with `timeout`; a verify that runs over while comparing returns what it found, `truncated: true`, `identical: false`, and one that runs over while extracting answers 504 `timeout`. |
+| `WZ_PACKER_MAX_DIFFS` | Most differences verify lists, default `200` (1 to 100000); more set `truncated`. |
+| `WZ_PACKER_MAX_REQUESTS` | Requests that may run at the same time, default `8` (1 to 32); the next gets 503 `busy`. Health is outside it. |
+| `WZ_PACKER_MAX_JOB_FOLDERS` | Most job folders the outbox may hold, default `500` (1 to 1000000). With that many a new pack gets 503 `outbox_full` until the publisher cleans the outbox (the packer never deletes finished jobs). |
+| `WZ_PACKER_MAX_JOBS_KEPT` | Finished jobs kept in memory, default `64`; older ones are still read from their `job.json`. |
+
+A value of a numeric variable that is not a whole number inside its range stops the start, like `WZ_VIEWER_MAX_REQUESTS`. `WZIMG_ALLOWED_ROOT` (set to `/data` by the image) is cleared in this mode: the roots, the outbox and the temp folder are the boundary.
+
+Endpoints (JSON; errors are `{ "error": { "code", "message" } }`; any other method on a known route gets 405, an unknown route 404):
+
+- `GET /v1/health` returns `{ "status": "ok", "version", "sources": { "canon", "owner", "friend" }, "outbox": true, "busy": false }`.
+- `POST /v1/pack` with `{ "person": "owner", "category": "String", "wzVersion": 83, "key": "GMS" }` (body at most 4 KiB, `application/json`, no other field, `wzVersion` must be 83 and `key` GMS) answers `202 { "jobId" }`. `person` is `owner` or `friend`; `category` is one plain name (letters, digits, `_`, `-`; not `Backups`). Errors: 400 `unknown_source`, `bad_category`, `bad_request`, `bad_path` (the img or category folder is a symbolic link); 404 `not_found` (no such category); 503 `source_unavailable`, `outbox_unavailable`, and `busy` when a pack or a verify is already running (one at a time; retry later).
+- `GET /v1/jobs/{id}` returns `{ "jobId", "state": "queued|running|done|failed", "person", "category", "wz": { "name", "sizeBytes", "sha256" }, "imgCount", "warnings": [], "error": { "code", "message" } }`; `wz` only when done, `error` only when failed. `queued` is the instant between the 202 and the start of the thread. Failure codes: `pack_failed` (the library reported errors, e.g. a damaged `.img`, or it packed fewer images than the category has; the warnings say which, without paths), `empty_category`, `unsafe_tree` (a symbolic link, a FIFO or another entry that is not a folder or a regular file), `unsupported_file` (a file that is not `.img`; the extractor's `.imgcase.json` and `Backups` folders are ignored), `unsupported_name` (a name the viewer's path rules refuse, or two names in one folder that differ only in case, which a `.wz` cannot keep apart), `too_many_images`, `input_too_large`, `output_too_large`, `insufficient_space` (the outbox volume has less free room than the `.wz` is expected to need), `timeout`, `outbox_unsafe`, `interrupted` (the packer stopped before the job ended), `internal_error`. A job reads `done` or `failed` only after its record is written and the work slot is free again. A job outlives the process: its record is `<outbox>/<jobId>/job.json`; that file is read back as input (known state and person, a plain category, and a `wz` that is exactly `<Category>.wz` with a size and a 64-hex sha256), and a record that fails the check is treated as no such job.
+- `POST /v1/verify` with `{ "jobId", "person" }` returns `{ "identical", "filesCompared", "diffs": [ { "path", "kind", "type" } ], "truncated" }`. It copies `<jobId>/<Category>.wz` (the name comes from the category, never from the record) once into the temp folder, hashes it while copying (the hash must be the one the pack recorded), checks that it opens with wz version 83 and key GMS fixed, extracts the copy again and compares every `.img` of it with the person's copy by value, picture and link text (the viewer's diff engine, so a recompressed picture with the same pixels is not a difference). `path` is the `.img` path (`String/Pet.img`) or, for a value inside it, the `.img` path, a colon and the value's path (`String/Pet.img:5000000/name`). `kind` is `changed`, `added` (in the `.wz`, not in the copy), `removed` (in the copy, not in the `.wz`) or `unreadable` (an `.img` does not parse or is too big; or the `.wz` itself does not open as version 83 / key GMS or cannot be extracted: then `path` is `<Category>.wz` and `type` `wz`). The viewer's per-diff limits (200 decoded canvases, 256 MiB decoded) are lifted for verify; the time budget bounds the work. A canvas that differs only in the colour under fully transparent pixels is a difference; linked canvases (`_inlink`/`_outlink`) are compared by their link text, which is what a repack must keep. `identical` is true only when nothing differs and nothing was cut. Errors: 404 `not_found` (unknown job id), 409 `job_not_done`, 409 `output_changed` (the `.wz` is not the file the pack recorded: size or sha256 differ, or it is a link), 409 with a pack failure code if the copy's tree is unsafe, 400 `unknown_source`, 503 `busy`, 503 `insufficient_space` (the temp folder cannot hold the copy of the `.wz` plus what it extracts to). A verify may take as long as the time budget.
+
+Safety notes:
+
+- Writes: only below `<outbox>/<jobId>` (a new random 128-bit id per job; the folder must not exist yet) and, for verify, a folder of its own in `WZ_PACKER_TMP`. The pack runs in a fresh `<jobId>/.work` folder (refused when it is a link, not empty, or not directly below the job folder) and the finished file is moved up in one rename that never replaces an existing file. `job.json` is written as a new file and renamed; nothing is written through a link. The trees are only read, and the packer never deletes anything in the outbox except its own `.work` folder (where an oversize `.wz` is made and dies) and a leftover `job.json.tmp`: cleaning old jobs is the publisher's job.
+- The category folder is walked with lstat before packing: a symbolic link, FIFO, device or other entry that is not a folder or a plain `.img` stops the job. This is a check of the state now. A file swapped for a link in the instant between that walk and the library's read is not caught; the trees are mounted read-only in the packer, so only another container writing to them could do it.
+- Disk: size the outbox volume for the biggest `.wz` times the number of job folders you keep (`WZ_PACKER_MAX_JOB_FOLDERS`), and the temp folder (tmpfs) for the biggest `.wz` plus its extracted images. At start the packer removes what a dead process left behind: `<jobId>/.work` folders and `wzpacker-*` folders in the temp folder (a link with such a name is removed as a link, never followed); finished job folders are never touched.
+- The library cannot cancel a parse, so a timed-out job or verify keeps the one work slot until its thread has really ended, and the timeout answer is sent at once.
+- Texts that come from the library are scrubbed of anything that looks like an absolute path and cut to 300 characters. No answer and no log line holds a path, the token or a header; the log has one line per request (method, route template, status, time) and one line per job state change (id and state or code).
+- The `.wz` is packed from the person's copy as it is on disk; the packer adds the semantic check on top of the library. Where the copy has an `.imgcase.json` and the tree is writable, the library may rename files to the casing it records (it cannot on a read-only mount, which is how the packer runs).
+- Like the viewer it has no TLS: keep it on a private network, do not publish its port.
+
+Tests: `dotnet test WzImgMCP.Tests -p:LinuxBuild=true` runs the packer tests on synthetic trees (no game data). One test is opt-in:
+`WZPACK_REAL_DATA=/path/to/folder/with/original/wz/files [WZPACK_REAL_CATEGORY=String] [WZPACK_REAL_KEY=GMS] dotnet test WzImgMCP.Tests -p:LinuxBuild=true --filter PackerRealDataTests`
+extracts the original `<Category>.wz`, packs the extraction through the packer, has verify compare the re-extracted pack with it, checks the size is within 25 percent of the original, and prints whether the bytes are identical. It is skipped when the variable is not set.
+
 ## Security notes
 
 - **`PathGuard` (`WZIMG_ALLOWED_ROOT`) is not a chroot or a sandbox.** It checks the path arguments the tools
