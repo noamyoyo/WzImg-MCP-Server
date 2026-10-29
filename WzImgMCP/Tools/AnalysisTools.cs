@@ -76,11 +76,14 @@ public class AnalysisTools
         }
     }
 
-    [McpServerTool(Name = "get_category_summary"), Description("Summary of a category from the file system, without opening any image: image count, total file size, subdirectories and one page of images with their file size. detailed=true also counts properties, canvases and sounds (opens every image of the page; refused for a category above WZIMG_SCAN_MAX_IMAGES images).")]
+    /// <summary>The page of get_category_summary with detailed=true when no limit is given: what the tool counted before (the first 100 images).</summary>
+    private const int DetailedDefaultLimit = 100;
+
+    [McpServerTool(Name = "get_category_summary"), Description("Summary of a category from the file system, without opening any image: image count, total file size, subdirectories and one page of images with their file size (200 per page by default, up to 1000). detailed=true also counts properties, canvases and sounds of the images of the page, which opens them: the page is then 100 images by default and may be at most WZIMG_SCAN_MAX_IMAGES (default 150); the category itself may be any size, read it page by page with offset / next_offset.")]
     public string GetCategorySummary(
         [Description("Category name")] string category,
         [Description("Also count properties, canvases and sounds per image (opens the images; default: false)")] bool detailed = false,
-        [Description("Maximum images to list (default: 200, max: 1000)")] int limit = Paging.DefaultLimit,
+        [Description("Maximum images to list (default: 200, max: 1000; with detailed=true default 100 and at most 150, because every listed image is opened)")] int? limit = null,
         [Description("Number of images to skip (default: 0)")] int offset = 0,
         CancellationToken cancellationToken = default)
     {
@@ -93,11 +96,12 @@ public class AnalysisTools
         {
             var ds = _session.DataSource;
             var source = _session.ImgSource;
-            (limit, offset) = Paging.Normalize(limit, offset);
+            int pageSize;
+            (pageSize, offset) = Paging.Normalize(limit ?? (detailed ? DetailedDefaultLimit : Paging.DefaultLimit), offset);
 
             var paths = ds.GetImagePathsInCategory(category);
             var subdirs = ds.GetSubdirectories(category).ToList();
-            var page = paths.Skip(offset).Take(limit).ToList();
+            var page = paths.Skip(offset).Take(pageSize).ToList();
 
             long totalSize = 0;
             foreach (var path in paths)
@@ -113,10 +117,9 @@ public class AnalysisTools
             ScanOutcome? scan = null;
             if (detailed)
             {
-                // Opens every image of the page: refused when the category is too big, and run under the time budget.
-                var plan = ScanGuard.PlanScan(_session, new[] { category },
-                    "Call get_category_summary without detailed (file sizes only), or analyse one image with validate_image.");
-                var pagePlan = new ScanPlan { Items = plan.Items.Skip(offset).Take(limit).ToList() };
+                // Opens the images of the page: refused when the page is bigger than the scan limit (the category may be any size),
+                // and run under the time budget.
+                var pagePlan = ScanGuard.PlanPage(_session, "get_category_summary", category, offset, pageSize);
                 var byName = imageSummaries.ToDictionary(i => i.Name, StringComparer.Ordinal);
                 int props = 0, canvases = 0, sounds = 0;
 
@@ -149,11 +152,13 @@ public class AnalysisTools
                 TotalSoundCount = soundCount,
                 Returned = imageSummaries.Count,
                 Offset = offset,
-                Limit = limit,
+                Limit = pageSize,
                 HasMore = offset + imageSummaries.Count < paths.Count,
                 NextOffset = Paging.NextOffset(offset, imageSummaries.Count, paths.Count),
                 Images = imageSummaries,
-                Truncated = scan?.BudgetExhausted ?? false,
+                // As before: true when the list does not hold every image of the category, and now also when the time budget cut the counting short.
+                Truncated = offset + imageSummaries.Count < paths.Count || (scan?.BudgetExhausted ?? false),
+                TruncatedReason = scan?.BudgetExhausted == true ? "time_budget" : offset + imageSummaries.Count < paths.Count ? "page" : null,
                 ScannedImages = scan?.Scanned,
                 TotalImages = scan?.Total
             };
@@ -718,6 +723,8 @@ public class CategorySummaryResult : MarkdownResultBase
     public List<ImageSummary>? Images { get; set; }
     /// <summary>detailed=true only: the time budget ended the scan before every image of the page was counted.</summary>
     public bool Truncated { get; set; }
+    /// <summary>"page" (more images follow this page) or "time_budget" (detailed=true: the counting stopped early) when truncated.</summary>
+    public string? TruncatedReason { get; set; }
     public int? ScannedImages { get; set; }
     public int? TotalImages { get; set; }
 }

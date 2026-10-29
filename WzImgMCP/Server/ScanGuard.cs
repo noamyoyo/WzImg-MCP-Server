@@ -244,6 +244,24 @@ public static class ScanGuard
     }
 
     /// <summary>
+    /// A scan of one page of a category (get_category_summary with detailed=true): the limit applies to the images of the page, not to
+    /// the category, so any page of a big category can be read as long as the page itself is small enough.
+    /// </summary>
+    public static ScanPlan PlanPage(WzSessionManager session, string tool, string category, int offset, int limit)
+    {
+        var paths = session.ImgSource.GetImagePathsInCategory(category);
+        var page = paths.Skip(offset).Take(limit).ToList();
+        int max = session.ScanLimits.MaxImages;
+        if (page.Count > max)
+            throw new ToolErrorException(ScopeTooWide,
+                $"{tool} with detailed=true would open the {page.Count} images of the page you asked for (category '{category}' has {paths.Count} images, " +
+                $"limit={limit}, offset={offset}), more than the limit of {max} per call ({ServerSettingsNames.ScanMax}); nothing was opened. " +
+                $"To continue, call {tool} again with the argument limit={max} (or less) and detailed=true; next_offset in the answer is the offset of the next page. " +
+                $"Without detailed (the default) the same call lists up to 1000 images per page with their file sizes and opens none.");
+        return new ScanPlan { Items = page.Select(p => new ScanItem(category, p, p.Replace('\\', '/'))).ToList() };
+    }
+
+    /// <summary>
     /// Refuses the work of a bulk tool (preload, export) on more than the sanity cap of images unless <c>force</c> is set.
     /// </summary>
     public static void RequireWithinBulkCap(WzSessionManager session, IReadOnlyList<string> categories, bool force, string alternative)

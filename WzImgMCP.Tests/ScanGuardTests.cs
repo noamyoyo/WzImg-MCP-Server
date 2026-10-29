@@ -326,6 +326,44 @@ public sealed class ScanGuardTests : IDisposable
     }
 
     [Fact]
+    public void CategorySummary_Detailed_ChecksThePageNotTheCategory_AndKeepsTheOldDefaultOf100()
+    {
+        var tools = new AnalysisTools(_session);
+        _session.ScanLimits = _session.ScanLimits with { MaxImages = 10 };    // the category has 30 images
+
+        // A page of 8 images of a category above the limit is fine.
+        var first = tools.GetCategorySummary(ScanTestTree.Category, detailed: true, limit: 8);
+        MarkdownTestHelper.AssertSuccess(first);
+        Assert.Equal("8", Value(first, "scanned_images"));
+        Assert.Equal("8", Value(first, "total_images"));
+        Assert.Equal("8", Value(first, "next_offset"));
+        Assert.Equal("true", Value(first, "truncated"));                      // as before: the list is not the whole category
+        Assert.Equal("page", Value(first, "truncated_reason"));
+        Assert.Equal(8, Stats.DiskReadCount);
+        Assert.Equal(0, Stats.CachedImageCount);
+
+        var last = tools.GetCategorySummary(ScanTestTree.Category, detailed: true, limit: 8, offset: 24);
+        Assert.Equal("6", Value(last, "scanned_images"));
+        Assert.DoesNotContain("truncated", last);
+
+        // A page above the limit is refused with the argument to change.
+        var refused = tools.GetCategorySummary(ScanTestTree.Category, detailed: true, limit: 11);
+        MarkdownTestHelper.AssertFailure(refused);
+        Assert.Equal("scope_too_wide", Value(refused, "error_code"));
+        var message = Value(refused, "error");
+        Assert.Contains("the 11 images of the page you asked for (category 'Mob' has 30 images", message);
+        Assert.Contains("argument limit=10 (or less) and detailed=true", message);
+        Assert.Contains("Without detailed", message);
+        Assert.Equal(8 + 6, Stats.DiskReadCount);                             // the refusal opened nothing
+
+        // Without limit, detailed=true gives the old page of 100 (here: the whole category), and the plain summary 200.
+        _session.ScanLimits = _session.ScanLimits with { MaxImages = 150 };
+        Assert.Equal("100", Value(tools.GetCategorySummary(ScanTestTree.Category, detailed: true), "limit"));
+        Assert.Equal("200", Value(tools.GetCategorySummary(ScanTestTree.Category), "limit"));
+        Assert.DoesNotContain("truncated", tools.GetCategorySummary(ScanTestTree.Category));
+    }
+
+    [Fact]
     public void CategorySummary_Detailed_IsRefusedAboveTheLimit_AndOtherwiseCountsWithoutCaching()
     {
         var tools = new AnalysisTools(_session);
