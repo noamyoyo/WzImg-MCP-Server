@@ -32,12 +32,15 @@ internal static class PackerTree
 
     private static readonly Regex CategoryPattern = new("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", RegexOptions.CultureInvariant);
 
+    public static bool IsCategory(string? category)
+        => category != null && CategoryPattern.IsMatch(category) && !string.Equals(category, "Backups", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>One plain name: letters, digits, '_' and '-', at most 64 characters, not Backups. Throws 400 <c>bad_category</c>.</summary>
     public static string RequireCategory(string? category)
     {
-        if (category == null || !CategoryPattern.IsMatch(category) || string.Equals(category, "Backups", StringComparison.OrdinalIgnoreCase))
+        if (!IsCategory(category))
             throw new ViewerApiException(400, "bad_category", "category must be one plain name of letters, digits, '_' or '-'");
-        return category;
+        return category!;
     }
 
     /// <summary>Every .img below <c>imgRoot/category</c>, sorted by path (ordinal). Throws <see cref="PackerJobException"/>.</summary>
@@ -65,9 +68,13 @@ internal static class PackerTree
                 throw new PackerJobException("source_unavailable", "a folder of the category cannot be read");
             }
 
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in entries)
             {
                 var name = Path.GetFileName(entry);
+                // A .wz does not tell names apart by case, so two names that differ only in case cannot be packed and read back.
+                if (!seen.Add(name))
+                    throw new PackerJobException("unsupported_name", "the category has two names that differ only in case");
                 var rel = relative + "/" + name;
                 if (new FileInfo(entry).LinkTarget != null)
                     throw new PackerJobException("unsafe_tree", "the category contains a symbolic link");

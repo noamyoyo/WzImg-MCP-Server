@@ -47,6 +47,8 @@ public sealed class PackerOptions
     public const int DefaultTimeBudgetSeconds = 900;
     public const string MaxDiffsEnvVar = "WZ_PACKER_MAX_DIFFS";
     public const int DefaultMaxDiffs = 200;
+    public const string MaxJobFoldersEnvVar = "WZ_PACKER_MAX_JOB_FOLDERS";
+    public const int DefaultMaxJobFolders = 500;
     public const string MaxJobsKeptEnvVar = "WZ_PACKER_MAX_JOBS_KEPT";
     public const int DefaultMaxJobsKept = 64;
     public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(30);
@@ -86,6 +88,9 @@ public sealed class PackerOptions
 
     /// <summary>Most differences verify lists; more sets <c>truncated</c>.</summary>
     public int MaxDiffs { get; init; } = DefaultMaxDiffs;
+
+    /// <summary>Most job folders the outbox may hold; with that many a new pack gets 503 <c>outbox_full</c> until the publisher cleans up.</summary>
+    public int MaxJobFolders { get; init; } = DefaultMaxJobFolders;
 
     /// <summary>Finished jobs kept in memory (older ones are still read from their job.json).</summary>
     public int MaxJobsKept { get; init; } = DefaultMaxJobsKept;
@@ -163,6 +168,7 @@ public sealed class PackerOptions
             MaxImageBytes = Strict(getEnv(MaxImageMbEnvVar), MaxImageMbEnvVar, DefaultMaxImageMb, 1, 1024) * 1024L * 1024L,
             TimeBudget = TimeSpan.FromSeconds(Strict(getEnv(TimeBudgetEnvVar), TimeBudgetEnvVar, DefaultTimeBudgetSeconds, 10, 14400)),
             MaxDiffs = Strict(getEnv(MaxDiffsEnvVar), MaxDiffsEnvVar, DefaultMaxDiffs, 1, 100000),
+            MaxJobFolders = Strict(getEnv(MaxJobFoldersEnvVar), MaxJobFoldersEnvVar, DefaultMaxJobFolders, 1, 1_000_000),
             MaxJobsKept = Strict(getEnv(MaxJobsKeptEnvVar), MaxJobsKeptEnvVar, DefaultMaxJobsKept, 1, 10000),
         };
     }

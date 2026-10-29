@@ -51,23 +51,41 @@ public sealed class PackerJob
 
     public void AddWarning(string warning) { lock (_gate) _warnings.Add(warning); }
 
-    public void Complete(PackerWz wz, int imgCount)
+    // The outcome is staged first and published last (see PackerService.RunPack): a job must not read "done" before its
+    // record is on disk and before the work slot is free, or a caller that reacts to "done" meets a busy packer.
+    private sealed record Outcome(string State, PackerWz? Wz, int ImgCount, PackerError? Error);
+    private Outcome? _staged;
+
+    public void StageDone(PackerWz wz, int imgCount)
+    {
+        lock (_gate) _staged = new Outcome(Done, wz, imgCount, null);
+    }
+
+    public void StageFailed(string code, string message)
+    {
+        lock (_gate) _staged = new Outcome(Failed, null, 0, new PackerError(code, message));
+    }
+
+    /// <summary>The view the job will have once <see cref="Publish"/> is called (for writing job.json first).</summary>
+    public PackerJobView FinalView()
     {
         lock (_gate)
         {
-            _wz = wz;
-            _imgCount = imgCount;
-            _state = Done;
+            var o = _staged ?? new Outcome(Failed, null, 0, new PackerError("internal_error", "the pack failed unexpectedly"));
+            return new PackerJobView(Id, o.State, Person, Category, o.Wz, o.ImgCount, _warnings.ToArray(), o.Error);
         }
     }
 
-    public void Fail(string code, string message)
+    /// <summary>Makes the staged outcome visible.</summary>
+    public void Publish()
     {
         lock (_gate)
         {
-            _wz = null;
-            _error = new PackerError(code, message);
-            _state = Failed;
+            var o = _staged ?? new Outcome(Failed, null, 0, new PackerError("internal_error", "the pack failed unexpectedly"));
+            _state = o.State;
+            _wz = o.Wz;
+            _imgCount = o.ImgCount;
+            _error = o.Error;
         }
     }
 
@@ -111,6 +129,25 @@ public sealed class PackerJobStore
 
     public string JobDirectory(string id) => Path.Combine(_options.Outbox, id);
 
+    /// <summary>
+    /// job.json is written by this process but lives in a folder other processes can write, so what is read back is checked as
+    /// input: a known state and person, a plain category, and a .wz that is exactly <c>&lt;Category&gt;.wz</c> with a size and a hash.
+    /// </summary>
+    internal static bool IsPlausible(PackerJobView v)
+    {
+        if (v.State is not (PackerJob.Queued or PackerJob.Running or PackerJob.Done or PackerJob.Failed)) return false;
+        if (!PackerOptions.People.Contains(v.Person)) return false;
+        if (!PackerTree.IsCategory(v.Category)) return false;
+        if (v.State == PackerJob.Done && v.Wz == null) return false;
+        if (v.Wz != null)
+        {
+            if (v.Wz.Name != v.Category + ".wz" || v.Wz.SizeBytes < 0 || !Sha256Pattern.IsMatch(v.Wz.Sha256 ?? "")) return false;
+        }
+        return true;
+    }
+
+    private static readonly Regex Sha256Pattern = new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
+
     /// <summary>Makes a new job with a fresh random id and its folder in the outbox. Throws 503 <c>outbox_unavailable</c> when the folder cannot be made.</summary>
     public PackerJob Create(string person, string category)
     {
@@ -152,7 +189,7 @@ public sealed class PackerJobStore
                 return null;
             var read = _files.Read(path, MaxJobFileBytes, null);
             var view = JsonSerializer.Deserialize<PackerJobView>(read.Bytes, Json);
-            if (view == null || view.JobId != id || !IsJobId(view.JobId))
+            if (view == null || view.JobId != id || !IsPlausible(view))
                 return null;
             if (view.State is PackerJob.Queued or PackerJob.Running)
                 view = view with { State = PackerJob.Failed, Wz = null, Error = new PackerError("interrupted", "the packer stopped before this job finished") };
@@ -164,17 +201,19 @@ public sealed class PackerJobStore
         }
     }
 
-    /// <summary>Writes job.json (new file, then rename; never through a link). A failure to write is logged by the caller's next read, not thrown.</summary>
-    public void Persist(PackerJob job)
+    public void Persist(PackerJob job) => Persist(job.View());
+
+    /// <summary>Writes job.json (new file, then rename; never through a link). A failure to write is not thrown: the in-memory job still answers.</summary>
+    public void Persist(PackerJobView view)
     {
-        var dir = JobDirectory(job.Id);
+        var dir = JobDirectory(view.JobId);
         var final = Path.Combine(dir, JobFileName);
         var temp = Path.Combine(dir, JobFileName + ".tmp");
         try
         {
             if (new DirectoryInfo(dir).LinkTarget != null)
                 return;
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(job.View(), Json);
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(view, Json);
             File.Delete(temp);   // a leftover of a failed write; deleting a link removes the link, not its target
             using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))   // CreateNew (O_EXCL) never opens through a link
             {
