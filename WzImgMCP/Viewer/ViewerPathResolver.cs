@@ -16,7 +16,8 @@ public sealed class ViewerApiException : Exception
 }
 
 /// <summary>A source file the resolver accepted: a regular file inside the source's <c>img</c> folder.</summary>
-public sealed record ResolvedImage(string Source, string RelativePath, string FullPath, long SizeBytes);
+/// <param name="Identity">Device and inode of the file when the resolver checked it (null if unavailable); the reader compares the file it opens with it.</param>
+public sealed record ResolvedImage(string Source, string RelativePath, string FullPath, long SizeBytes, FileIdentity? Identity = null);
 
 /// <summary>
 /// Turns (source name, relative image path such as <c>String/Consume.img</c>) into a file under that source's
@@ -42,10 +43,12 @@ public class ViewerPathResolver
     private const string ImgExtension = ".img";
 
     private readonly IReadOnlyDictionary<string, string> _roots;
+    private readonly IViewerFileSystem? _fileSystem;
 
-    public ViewerPathResolver(IReadOnlyDictionary<string, string> roots)
+    public ViewerPathResolver(IReadOnlyDictionary<string, string> roots, IViewerFileSystem? fileSystem = null)
     {
         _roots = roots;
+        _fileSystem = fileSystem ?? (OperatingSystem.IsLinux() ? new PosixViewerFileSystem() : null);
     }
 
     /// <summary>Resolves the file. Hook for the async endpoints; tests override it.</summary>
@@ -119,7 +122,10 @@ public class ViewerPathResolver
             throw new ViewerApiException(404, "not_found", "image not found");
         }
 
-        return new ResolvedImage(source, string.Join('/', segments), real, size);
+        FileIdentity? identity = null;
+        try { identity = _fileSystem?.Identity(real); } catch (PlatformNotSupportedException) { }
+
+        return new ResolvedImage(source, string.Join('/', segments), real, size, identity);
     }
 
     /// <summary>Checks the text rules and returns the segments. Throws <c>bad_path</c>.</summary>

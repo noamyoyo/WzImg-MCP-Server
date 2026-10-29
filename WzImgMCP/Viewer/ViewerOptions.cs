@@ -36,6 +36,22 @@ public sealed class ViewerOptions
     /// <summary>Requests that may run at the same time; the next one gets 503 <c>busy</c>.</summary>
     public int MaxConcurrentRequests { get; init; } = DefaultMaxConcurrentRequests;
 
+    public const string MaxFileMbEnvVar = "WZ_VIEWER_MAX_FILE_MB";
+    public const string MaxDecodesEnvVar = "WZ_VIEWER_MAX_DECODES";
+    public const string CacheMbEnvVar = "WZ_VIEWER_CACHE_MB";
+    public const int DefaultMaxFileMb = 128;
+    public const int DefaultMaxDecodes = 2;
+    public const int DefaultCacheMb = 256;
+
+    /// <summary>Largest .img file the viewer reads; a bigger one gets 413 <c>too_large</c>.</summary>
+    public long MaxFileBytes { get; init; } = DefaultMaxFileMb * 1024L * 1024L;
+
+    /// <summary>Parses (and later pixel decodes) that may run at the same time.</summary>
+    public int MaxDecodes { get; init; } = DefaultMaxDecodes;
+
+    /// <summary>Upper bound for the estimated memory of the parsed-image cache.</summary>
+    public long CacheBytes { get; init; } = DefaultCacheMb * 1024L * 1024L;
+
     /// <summary>Longest time one request may run before it is cut off with 504 <c>timeout</c>.</summary>
     public TimeSpan RequestTimeout { get; init; } = DefaultRequestTimeout;
 
@@ -73,8 +89,17 @@ public sealed class ViewerOptions
             var configured = getEnv("WZ_VIEWER_ROOT_" + name.ToUpperInvariant());
             roots[name] = Path.GetFullPath(string.IsNullOrWhiteSpace(configured) ? "/data/" + name : configured.Trim());
         }
-        return new ViewerOptions(getEnv(TokenEnvVar), roots);
+        return new ViewerOptions(getEnv(TokenEnvVar), roots)
+        {
+            MaxFileBytes = ParseWhole(getEnv(MaxFileMbEnvVar), DefaultMaxFileMb, 1, 1024) * 1024L * 1024L,
+            MaxDecodes = (int)ParseWhole(getEnv(MaxDecodesEnvVar), DefaultMaxDecodes, 1, 16),
+            CacheBytes = ParseWhole(getEnv(CacheMbEnvVar), DefaultCacheMb, 0, 16384) * 1024L * 1024L,
+        };
     }
+
+    /// <summary>A whole number inside [min, max]; blank, not a number or out of range gives the default.</summary>
+    private static long ParseWhole(string? raw, long fallback, long min, long max)
+        => long.TryParse(raw?.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= min && v <= max ? v : fallback;
 
     public static ViewerOptions FromEnvironment() => FromEnvironment(Environment.GetEnvironmentVariable);
 }

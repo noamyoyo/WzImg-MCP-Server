@@ -54,16 +54,16 @@ public static class ViewerHost
     }
 
     /// <summary>Builds the host without starting it. <paramref name="resolver"/> is for tests; the default reads the options' roots.</summary>
-    public static WebApplication Build(string[] args, ViewerOptions options, string url, ViewerPathResolver? resolver = null)
+    public static WebApplication Build(string[] args, ViewerOptions options, string url, ViewerPathResolver? resolver = null, IViewerFileSystem? fileSystem = null)
     {
-        var builder = CreateBuilder(args, options, url, resolver);
+        var builder = CreateBuilder(args, options, url, resolver, fileSystem);
         var app = builder.Build();
         Configure(app, options);
         return app;
     }
 
     /// <summary>Service registration only. Public so a test can list every registered service.</summary>
-    public static WebApplicationBuilder CreateBuilder(string[] args, ViewerOptions options, string url, ViewerPathResolver? resolver = null)
+    public static WebApplicationBuilder CreateBuilder(string[] args, ViewerOptions options, string url, ViewerPathResolver? resolver = null, IViewerFileSystem? fileSystem = null)
     {
         var builder = WebApplication.CreateBuilder(args);
 
@@ -82,7 +82,13 @@ public static class ViewerHost
         });
 
         builder.Services.AddSingleton(options);
-        builder.Services.AddSingleton(resolver ?? new ViewerPathResolver(options.Roots));
+        var files = fileSystem ?? new PosixViewerFileSystem();
+        builder.Services.AddSingleton(files);
+        builder.Services.AddSingleton(resolver ?? new ViewerPathResolver(options.Roots, files));
+        builder.Services.AddSingleton(new ViewerImageCache(options.CacheBytes));
+        builder.Services.AddSingleton(sp => new ViewerImageLoader(options, sp.GetRequiredService<IViewerFileSystem>(), sp.GetRequiredService<ViewerImageCache>()));
+        builder.Services.AddSingleton(new ViewerDecodeLimiter(options.MaxDecodes));
+        builder.Services.AddSingleton<ViewerWorkRunner>();
         builder.Services.AddSingleton(new ViewerRequestLimiter(options.MaxConcurrentRequests));
         return builder;
     }
@@ -92,6 +98,7 @@ public static class ViewerHost
     {
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("WzImgMCP.Viewer");
         var limiter = app.Services.GetRequiredService<ViewerRequestLimiter>();
+        ViewerLinkContext.Install();   // MapleLib's static hook for _outlink targets; answers null outside a viewer request
         var tokenDigest = SHA256.HashData(Encoding.UTF8.GetBytes(options.Token));
 
         // Outermost: log one line per request (method, route template, status, time) and turn any unhandled
@@ -148,12 +155,17 @@ public static class ViewerHost
         app.Use(async (context, next) =>
         {
             // Health is cheap and is what a container health check calls: it must still answer while every slot is busy.
-            bool takesSlot = context.GetEndpoint()?.Metadata.GetMetadata<NoRequestSlot>() == null;
-            if (takesSlot && !limiter.TryEnter())
+            ViewerRequestSlot? slot = null;
+            if (context.GetEndpoint()?.Metadata.GetMetadata<NoRequestSlot>() == null)
             {
-                context.Response.Headers.RetryAfter = "1";
-                await WriteError(context, 503, "busy", "too many requests in progress; retry shortly");
-                return;
+                slot = limiter.TryEnter();
+                if (slot == null)
+                {
+                    context.Response.Headers.RetryAfter = "1";
+                    await WriteError(context, 503, "busy", "too many requests in progress; retry shortly");
+                    return;
+                }
+                context.Items[RequestSlotKey] = slot;
             }
             var clientAborted = context.RequestAborted;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(clientAborted);
@@ -175,8 +187,7 @@ public static class ViewerHost
             finally
             {
                 context.RequestAborted = clientAborted;
-                if (takesSlot)
-                    limiter.Exit();
+                slot?.ReleaseUnlessHeld();   // stays taken while uncancellable work of this request is still running
             }
         });
 
@@ -189,25 +200,37 @@ public static class ViewerHost
 
         app.MapGet("/v1/resolve", async (HttpContext context, ViewerPathResolver resolver) =>
         {
-            var source = Single(context.Request.Query["source"]);
-            var path = Single(context.Request.Query["path"]);
-            var image = await resolver.ResolveAsync(source, path, context.RequestAborted);
+            var image = await resolver.ResolveAsync(Single(context.Request.Query["source"]), Single(context.Request.Query["path"]), context.RequestAborted);
             return Results.Json(new { source = image.Source, path = image.RelativePath, exists = true, sizeBytes = image.SizeBytes }, Json);
-        }).AddEndpointFilter(async (invocation, next) =>
+        }).AddEndpointFilter(TypedErrors);
+
+        app.MapGet("/v1/inspect", async (HttpContext context, ViewerPathResolver resolver, ViewerImageLoader loader, ViewerWorkRunner runner) =>
         {
-            try
-            {
-                return await next(invocation);
-            }
-            catch (ViewerApiException ex)
-            {
-                return Results.Json(new { error = new { code = ex.Code, message = ex.Message } }, Json, statusCode: ex.Status);
-            }
-        });
+            var image = await resolver.ResolveAsync(Single(context.Request.Query["source"]), Single(context.Request.Query["path"]), context.RequestAborted);
+            var slot = context.Items[RequestSlotKey] as ViewerRequestSlot;
+            var ct = context.RequestAborted;
+            var result = await runner.RunAsync(image.Source, slot, ct, links => ViewerInspector.Inspect(loader, image, links, ct));
+            return Results.Json(result, Json);
+        }).AddEndpointFilter(TypedErrors);
+    }
+
+    /// <summary>Turns a <see cref="ViewerApiException"/> from a handler into its typed JSON answer.</summary>
+    private static async ValueTask<object?> TypedErrors(EndpointFilterInvocationContext invocation, EndpointFilterDelegate next)
+    {
+        try
+        {
+            return await next(invocation);
+        }
+        catch (ViewerApiException ex)
+        {
+            return Results.Json(new { error = new { code = ex.Code, message = ex.Message } }, Json, statusCode: ex.Status);
+        }
     }
 
     /// <summary>Endpoint marker: the request does not count against the concurrency cap (the token is still required).</summary>
     private sealed class NoRequestSlot { }
+
+    internal static readonly object RequestSlotKey = new();
 
     /// <summary>Constant time comparison. Both values are hashed first, so the compared arrays always have the same length.</summary>
     private static bool TokenMatches(byte[] expectedDigest, Microsoft.Extensions.Primitives.StringValues supplied)
