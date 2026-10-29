@@ -109,10 +109,13 @@ public class NavigationTools : ToolBase
         });
     }
 
-    [McpServerTool(Name = "search_by_name"), Description("Search for properties by name pattern. Use compact=true for smaller responses.")]
+    private const string ScanAlternative =
+        "Narrow it with the image parameter (list_images_in_category pages through the image names of a category), or search a smaller category.";
+
+    [McpServerTool(Name = "search_by_name"), Description("Search for properties by name pattern in one image, or in all images of a category of at most WZIMG_SCAN_MAX_IMAGES (default 150) images. Use compact=true for smaller responses.")]
     public string SearchByName(
         [Description("Search pattern (case-insensitive, supports * wildcards)")] string pattern,
-        [Description("Category to search in (optional, searches all if not specified)")] string? category = null,
+        [Description("Category to search in (required unless an image is given)")] string? category = null,
         [Description("Specific image to search in (optional)")] string? image = null,
         [Description("Maximum results to return (default: 20, max: 200)")] int maxResults = 20,
         [Description("Return compact format with paths only (default: true)")] bool compact = true)
@@ -125,47 +128,22 @@ public class NavigationTools : ToolBase
             var results = new List<SearchMatch>();
             var regex = WildcardToRegex(pattern);
 
-            IEnumerable<string> categories = string.IsNullOrEmpty(category)
-                ? Session.DataSource.GetCategories()
-                : new[] { category };
-
-            foreach (var cat in categories)
+            var plan = ScanGuard.PlanSearch(Session, category, image, ScanAlternative);
+            var scan = ScanGuard.Run(Session, plan, (img, cat, name) =>
             {
-                IEnumerable<WzImage> images;
-                if (!string.IsNullOrEmpty(image))
-                {
-                    var img = Session.DataSource.GetImage(cat, image);
-                    images = img != null ? new[] { img } : Enumerable.Empty<WzImage>();
-                }
-                else
-                {
-                    images = Session.DataSource.GetImagesInCategory(cat);
-                }
+                SearchInObject(img, cat, name, "", regex, results, maxResults, compact);
+                return results.Count >= maxResults;
+            });
 
-                foreach (var img in images)
-                {
-                    if (!img.Parsed) img.ParseImage();
-                    SearchInObject(img, cat, img.Name, "", regex, results, maxResults, compact);
-                    if (results.Count >= maxResults) break;
-                }
-                if (results.Count >= maxResults) break;
-            }
-
-            return new SearchData
-            {
-                Pattern = pattern,
-                Matches = results,
-                TotalFound = results.Count,
-                Truncated = results.Count >= maxResults
-            };
+            return ToSearchData(pattern, results, maxResults, scan);
         });
     }
 
-    [McpServerTool(Name = "search_by_value"), Description("Search for properties by value. Use compact=true for smaller responses.")]
+    [McpServerTool(Name = "search_by_value"), Description("Search for properties by value in one image, or in all images of a category of at most WZIMG_SCAN_MAX_IMAGES (default 150) images. Use compact=true for smaller responses.")]
     public string SearchByValue(
         [Description("Value to search for (string representation)")] string value,
         [Description("Property type to filter (optional: String, Int, Float, etc.)")] string? type = null,
-        [Description("Category to search in (optional)")] string? category = null,
+        [Description("Category to search in (required unless an image is given)")] string? category = null,
         [Description("Specific image to search in (optional)")] string? image = null,
         [Description("Maximum results to return (default: 20, max: 200)")] int maxResults = 20,
         [Description("Return compact format with paths only (default: true)")] bool compact = true)
@@ -177,40 +155,31 @@ public class NavigationTools : ToolBase
 
             var results = new List<SearchMatch>();
 
-            IEnumerable<string> categories = string.IsNullOrEmpty(category)
-                ? Session.DataSource.GetCategories()
-                : new[] { category };
-
-            foreach (var cat in categories)
+            var plan = ScanGuard.PlanSearch(Session, category, image, ScanAlternative);
+            var scan = ScanGuard.Run(Session, plan, (img, cat, name) =>
             {
-                IEnumerable<WzImage> images;
-                if (!string.IsNullOrEmpty(image))
-                {
-                    var img = Session.DataSource.GetImage(cat, image);
-                    images = img != null ? new[] { img } : Enumerable.Empty<WzImage>();
-                }
-                else
-                {
-                    images = Session.DataSource.GetImagesInCategory(cat);
-                }
+                SearchByValueInObject(img, cat, name, "", value, type, results, maxResults, compact);
+                return results.Count >= maxResults;
+            });
 
-                foreach (var img in images)
-                {
-                    if (!img.Parsed) img.ParseImage();
-                    SearchByValueInObject(img, cat, img.Name, "", value, type, results, maxResults, compact);
-                    if (results.Count >= maxResults) break;
-                }
-                if (results.Count >= maxResults) break;
-            }
-
-            return new SearchData
-            {
-                Pattern = value,
-                Matches = results,
-                TotalFound = results.Count,
-                Truncated = results.Count >= maxResults
-            };
+            return ToSearchData(value, results, maxResults, scan);
         });
+    }
+
+    private static SearchData ToSearchData(string pattern, List<SearchMatch> results, int maxResults, ScanOutcome scan)
+    {
+        bool full = results.Count >= maxResults;
+        return new SearchData
+        {
+            Pattern = pattern,
+            Matches = results,
+            TotalFound = results.Count,
+            Truncated = full || scan.BudgetExhausted,
+            TruncatedReason = scan.BudgetExhausted ? "time_budget" : full ? "max_results" : null,
+            ScannedImages = scan.Scanned,
+            TotalImages = scan.Total,
+            FailedImages = scan.Failed > 0 ? scan.Failed : null
+        };
     }
 
     [McpServerTool(Name = "get_property_path"), Description("Get the full path of a property")]
@@ -452,7 +421,16 @@ public class SearchData
     public string? Pattern { get; init; }
     public List<SearchMatch>? Matches { get; init; }
     public int TotalFound { get; init; }
+    /// <summary>True when the list stops early: maxResults was reached, or the time budget ended the scan.</summary>
     public bool Truncated { get; init; }
+    /// <summary>"max_results" or "time_budget" when truncated.</summary>
+    public string? TruncatedReason { get; init; }
+    /// <summary>Images that were opened and searched.</summary>
+    public int ScannedImages { get; init; }
+    /// <summary>Images the search was meant to cover; more than scanned_images when it was cut short.</summary>
+    public int TotalImages { get; init; }
+    /// <summary>Images that could not be read (skipped); absent when none.</summary>
+    public int? FailedImages { get; init; }
 }
 
 public class SearchMatch

@@ -103,55 +103,77 @@ public class FileTools : ToolBase
         });
     }
 
-    [McpServerTool(Name = "list_images_in_category"), Description("List all .img files in a category")]
+    [McpServerTool(Name = "list_images_in_category"), Description("List the .img files of a category, one page at a time (no image is opened). Sorted by name; use offset/nextOffset to read on.")]
     public string ListImagesInCategory(
         [Description("Category name (e.g., 'Map', 'Mob', 'Npc')")] string category,
-        [Description("Subdirectory within the category (optional)")] string? subdirectory = null)
+        [Description("Subdirectory within the category (optional)")] string? subdirectory = null,
+        [Description("Maximum images to return (default: 200, max: 1000)")] int limit = Paging.DefaultLimit,
+        [Description("Number of images to skip (default: 0)")] int offset = 0)
     {
         return Execute(() =>
         {
             var ds = Session.DataSource;
-            IEnumerable<string> imageNames;
+            (limit, offset) = Paging.Normalize(limit, offset);
+            List<ImageEntry> page;
+            int total;
 
             if (string.IsNullOrEmpty(subdirectory))
             {
-                imageNames = ds.GetImagesInCategory(category).Select(i => i.Name);
+                // Names only: the paths come from the category index, no image is loaded or parsed.
+                var paths = ds.GetImagePathsInCategory(category);
+                total = paths.Count;
+                page = paths.Skip(offset).Take(limit).Select(p =>
+                {
+                    var relative = p.Replace('\\', '/');
+                    return new ImageEntry { Name = relative[(relative.LastIndexOf('/') + 1)..], FullPath = $"{category}/{relative}" };
+                }).ToList();
             }
             else
             {
-                imageNames = ds.GetImageNamesInDirectory(category, subdirectory);
+                var names = ds.GetImageNamesInDirectory(category, subdirectory).OrderBy(n => n, StringComparer.Ordinal).ToList();
+                total = names.Count;
+                page = names.Skip(offset).Take(limit).Select(n => new ImageEntry { Name = n, FullPath = $"{category}/{subdirectory}/{n}" }).ToList();
             }
 
             return new ImageListData
             {
                 Category = category,
                 Subdirectory = subdirectory,
-                Images = imageNames.Select(n => new ImageEntry
-                {
-                    Name = n,
-                    FullPath = string.IsNullOrEmpty(subdirectory)
-                        ? $"{category}/{n}"
-                        : $"{category}/{subdirectory}/{n}"
-                }).ToList()
+                Total = total,
+                Returned = page.Count,
+                Offset = offset,
+                Limit = limit,
+                HasMore = offset + page.Count < total,
+                NextOffset = Paging.NextOffset(offset, page.Count, total),
+                Images = page
             };
         });
     }
 
-    [McpServerTool(Name = "get_cache_stats"), Description("Get cache statistics for the current data source")]
+    [McpServerTool(Name = "get_cache_stats"), Description("Get cache and memory statistics for the current data source")]
     public string GetCacheStats()
     {
         return Execute(() =>
         {
             var stats = Session.DataSource.GetStats();
+            var trim = Session.MemoryGuard.LastTrim;
             return new CacheStatsData
             {
                 CachedImageCount = stats.CachedImageCount,
+                PinnedImageCount = stats.PinnedImageCount,
                 CacheHitCount = stats.CacheHitCount,
                 CacheMissCount = stats.CacheMissCount,
                 CacheHitRatio = stats.CacheHitRatio,
                 DiskReadCount = stats.DiskReadCount,
                 MemoryUsageBytes = stats.MemoryUsageBytes,
-                MemoryUsageFormatted = FormatSize(stats.MemoryUsageBytes)
+                MemoryUsageFormatted = FormatSize(stats.MemoryUsageBytes),
+                CacheLimitBytes = stats.CacheLimitBytes,
+                ManagedHeapBytes = GC.GetTotalMemory(false),
+                ProcessWorkingSetBytes = Environment.WorkingSet,
+                TrimCount = Session.MemoryGuard.TrimCount,
+                LastTrimUtc = trim?.At.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                LastTrimReason = trim?.Reason,
+                LastTrimReleasedImages = trim?.ReleasedImages
             };
         });
     }
@@ -245,6 +267,15 @@ public class ImageListData
 {
     public string? Category { get; init; }
     public string? Subdirectory { get; init; }
+    /// <summary>All images of the category (or subdirectory), not only this page.</summary>
+    public int Total { get; init; }
+    public int Returned { get; init; }
+    public int Offset { get; init; }
+    public int Limit { get; init; }
+    /// <summary>True when more images follow this page; false is left out of the text (as for every flag), then there is no nextOffset either.</summary>
+    public bool HasMore { get; init; }
+    /// <summary>The offset to ask for the next page; absent on the last page.</summary>
+    public int? NextOffset { get; init; }
     public required List<ImageEntry> Images { get; init; }
 }
 
@@ -257,12 +288,23 @@ public class ImageEntry
 public class CacheStatsData
 {
     public int CachedImageCount { get; init; }
+    /// <summary>Cached images with unsaved edits: never evicted or trimmed.</summary>
+    public int PinnedImageCount { get; init; }
     public int CacheHitCount { get; init; }
     public int CacheMissCount { get; init; }
     public double CacheHitRatio { get; init; }
     public int DiskReadCount { get; init; }
     public long MemoryUsageBytes { get; init; }
     public string? MemoryUsageFormatted { get; init; }
+    /// <summary>The size limit of the image cache (WZIMG_CACHE_MB), in the same estimated bytes as memory_usage_bytes.</summary>
+    public long CacheLimitBytes { get; init; }
+    /// <summary>Managed heap of the server (GC.GetTotalMemory), garbage not yet collected included.</summary>
+    public long ManagedHeapBytes { get; init; }
+    public long ProcessWorkingSetBytes { get; init; }
+    public long TrimCount { get; init; }
+    public string? LastTrimUtc { get; init; }
+    public string? LastTrimReason { get; init; }
+    public int? LastTrimReleasedImages { get; init; }
 }
 
 public class ClearCacheData

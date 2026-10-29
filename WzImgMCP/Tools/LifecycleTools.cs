@@ -122,9 +122,10 @@ public class LifecycleTools
         }
     }
 
-    [McpServerTool(Name = "preload_category"), Description("Preload all images in a category")]
+    [McpServerTool(Name = "preload_category"), Description("Preload the images of a category into the cache. Stops when the cache is full (WZIMG_CACHE_MB, default 400); refused above WZIMG_BULK_MAX_IMAGES (default 2000) images unless force is set.")]
     public string PreloadCategory(
-        [Description("Category name")] string category)
+        [Description("Category name")] string category,
+        [Description("Preload even when the category holds more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false)
     {
         if (!_session.IsInitialized)
         {
@@ -134,39 +135,49 @@ public class LifecycleTools
         try
         {
             var ds = _session.DataSource;
+            var source = _session.ImgSource;
+            ScanGuard.RequireWithinBulkCap(_session, new[] { category }, force,
+                "Pass force=true to preload anyway: the cache keeps only what fits in WZIMG_CACHE_MB, so the call stops when it is full.");
 
-            // Count images before
-            int beforeCount = 0;
-            foreach (var img in ds.GetImagesInCategory(category))
+            var paths = ds.GetImagePathsInCategory(category);
+            int before = CountCachedParsed(source, category);
+
+            // Load until the cache is (nearly) full: going on would only push out the images loaded a moment ago.
+            bool cacheFull = false;
+            foreach (var path in paths)
             {
-                if (!img.Parsed) beforeCount++;
+                _session.Touch();
+                var stats = ds.GetStats();
+                if (stats.CacheLimitBytes > 0 && stats.MemoryUsageBytes >= stats.CacheLimitBytes - stats.CacheLimitBytes / 20)
+                {
+                    cacheFull = true;
+                    break;
+                }
+
+                ds.GetImage(category, path);
             }
 
-            // Preload
-            ds.PreloadCategory(category);
-
-            // Count images after
-            int loadedCount = 0;
-            foreach (var img in ds.GetImagesInCategory(category))
-            {
-                if (img.Parsed) loadedCount++;
-            }
-
+            int after = CountCachedParsed(source, category);
             return new PreloadResult
             {
                 Success = true,
                 Category = category,
-                LoadedCount = loadedCount,
-                NewlyLoaded = beforeCount
+                LoadedCount = after,
+                NewlyLoaded = Math.Max(0, after - before),
+                TotalImages = paths.Count,
+                StoppedAtCacheLimit = cacheFull
             };
         }
         catch (Exception ex)
         {
-            return new PreloadResult { Success = false, Error = ex.Message };
+            return new PreloadResult { Success = false, Error = ex.Message, ErrorCode = ToolErrorException.CodeOf(ex) };
         }
     }
 
-    [McpServerTool(Name = "unload_category"), Description("Unload all images in a category (free memory)")]
+    private static int CountCachedParsed(MapleLib.Img.ImgFileSystemDataSource source, string category)
+        => source.GetCachedImages().Count(c => c.Image.Parsed && string.Equals(c.Category, category, StringComparison.OrdinalIgnoreCase));
+
+    [McpServerTool(Name = "unload_category"), Description("Unload the cached images of a category (free memory). Images that are not cached are not touched.")]
     public string UnloadCategory(
         [Description("Category name")] string category)
     {
@@ -177,12 +188,17 @@ public class LifecycleTools
 
         try
         {
-            var ds = _session.DataSource;
+            var source = _session.ImgSource;
             int unloadedCount = 0;
+
+            // Only the images that are in the cache can hold memory: nothing is loaded to be unloaded.
+            var cached = source.GetCachedImages()
+                .Where(c => string.Equals(c.Category, category, StringComparison.OrdinalIgnoreCase))
+                .ToList();
 
             // Unparsing a changed image would discard the edits (and a later save would write it empty),
             // so refuse the whole call before touching anything.
-            var changed = ds.GetImagesInCategory(category).Where(i => i.Changed).Select(i => i.Name).ToList();
+            var changed = cached.Where(c => c.Image.Changed).Select(c => c.Image.Name).ToList();
             if (changed.Count > 0)
             {
                 var shown = string.Join(", ", changed.Take(5)) + (changed.Count > 5 ? ", ..." : "");
@@ -193,13 +209,15 @@ public class LifecycleTools
                 };
             }
 
-            foreach (var img in ds.GetImagesInCategory(category))
+            foreach (var entry in cached)
             {
-                if (img.Parsed)
+                if (entry.Image.Parsed)
                 {
-                    img.UnparseImage();
+                    entry.Image.UnparseImage();
                     unloadedCount++;
                 }
+                // Out of the cache as well: an unparsed image left there would keep counting at its old size.
+                source.Manager.RemoveFromCache(entry.Image);
             }
 
             return new UnloadResult
@@ -256,9 +274,14 @@ public class PreloadResult : MarkdownResultBase
 {
     public bool Success { get; set; }
     public string? Error { get; set; }
+    public string? ErrorCode { get; set; }
     public string? Category { get; set; }
+    /// <summary>Images of the category that are parsed and in the cache now.</summary>
     public int LoadedCount { get; set; }
     public int NewlyLoaded { get; set; }
+    public int TotalImages { get; set; }
+    /// <summary>True when the call stopped early because the cache is full (false is left out of the text).</summary>
+    public bool StoppedAtCacheLimit { get; set; }
 }
 
 public class UnloadResult : MarkdownResultBase

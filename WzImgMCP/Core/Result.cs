@@ -9,11 +9,13 @@ public class Result<T>
 {
     public bool Success { get; init; }
     public string? Error { get; init; }
+    /// <summary>A stable code for errors a client can act on (for example scope_too_wide); null for other errors.</summary>
+    public string? ErrorCode { get; init; }
     public T? Data { get; init; }
 
     public static Result<T> Ok(T data) => new() { Success = true, Data = data };
     public static Result<T> Fail(string error) => new() { Success = false, Error = error };
-    public static Result<T> Fail(Exception ex) => new() { Success = false, Error = ex.Message };
+    public static Result<T> Fail(Exception ex) => new() { Success = false, Error = ex.Message, ErrorCode = WzImgMCP.Server.ToolErrorException.CodeOf(ex) };
     public static implicit operator string(Result<T> value) => MarkdownResultFormatter.Format(value);
 }
 

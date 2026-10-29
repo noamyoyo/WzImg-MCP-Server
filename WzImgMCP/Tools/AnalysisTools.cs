@@ -35,21 +35,23 @@ public class AnalysisTools
             var stats = ds.GetStats();
             var categories = ds.GetCategories().ToList();
 
+            // Counts come from the category index and the cache: no image is opened to answer this.
+            var cached = _session.ImgSource.GetCachedImages();
             var categoryStats = new List<CategoryStats>();
             int totalImages = 0;
             int totalParsed = 0;
 
             foreach (var cat in categories)
             {
-                var images = ds.GetImagesInCategory(cat).ToList();
-                var parsedCount = images.Count(img => img.Parsed);
-                totalImages += images.Count;
+                int imageCount = ds.GetImagePathsInCategory(cat).Count;
+                int parsedCount = cached.Count(c => c.Image.Parsed && string.Equals(c.Category, cat, StringComparison.OrdinalIgnoreCase));
+                totalImages += imageCount;
                 totalParsed += parsedCount;
 
                 categoryStats.Add(new CategoryStats
                 {
                     Name = cat,
-                    ImageCount = images.Count,
+                    ImageCount = imageCount,
                     ParsedCount = parsedCount
                 });
             }
@@ -74,9 +76,12 @@ public class AnalysisTools
         }
     }
 
-    [McpServerTool(Name = "get_category_summary"), Description("Get a summary of a specific category")]
+    [McpServerTool(Name = "get_category_summary"), Description("Summary of a category from the file system, without opening any image: image count, total file size, subdirectories and one page of images with their file size. detailed=true also counts properties, canvases and sounds (opens every image of the page; refused for a category above WZIMG_SCAN_MAX_IMAGES images).")]
     public string GetCategorySummary(
-        [Description("Category name")] string category)
+        [Description("Category name")] string category,
+        [Description("Also count properties, canvases and sounds per image (opens the images; default: false)")] bool detailed = false,
+        [Description("Maximum images to list (default: 200, max: 1000)")] int limit = Paging.DefaultLimit,
+        [Description("Number of images to skip (default: 0)")] int offset = 0)
     {
         if (!_session.IsInitialized)
         {
@@ -86,62 +91,81 @@ public class AnalysisTools
         try
         {
             var ds = _session.DataSource;
-            var images = ds.GetImagesInCategory(category).ToList();
+            var source = _session.ImgSource;
+            (limit, offset) = Paging.Normalize(limit, offset);
+
+            var paths = ds.GetImagePathsInCategory(category);
             var subdirs = ds.GetSubdirectories(category).ToList();
+            var page = paths.Skip(offset).Take(limit).ToList();
 
-            int canvasCount = 0;
-            int soundCount = 0;
-            int propertyCount = 0;
+            long totalSize = 0;
+            foreach (var path in paths)
+                totalSize += Math.Max(0, source.GetImageFileSize(category, path));
 
-            var imageSummaries = new List<ImageSummary>();
-
-            foreach (var img in images.Take(100)) // Limit to avoid long operations
+            var imageSummaries = page.Select(p => new ImageSummary
             {
-                var wasParsed = img.Parsed;
-                if (!img.Parsed) img.ParseImage();
+                Name = p.Replace('\\', '/'),
+                SizeBytes = Math.Max(0, source.GetImageFileSize(category, p))
+            }).ToList();
 
-                var propCount = CountPropertiesRecursive(img, 0, 5);
-                var canvases = CountCanvasesRecursive(img, 0, 10);
-                var sounds = CountSoundsRecursive(img, 0, 10);
+            int? propertyCount = null, canvasCount = null, soundCount = null;
+            ScanOutcome? scan = null;
+            if (detailed)
+            {
+                // Opens every image of the page: refused when the category is too big, and run under the time budget.
+                var plan = ScanGuard.PlanScan(_session, new[] { category },
+                    "Call get_category_summary without detailed (file sizes only), or analyse one image with validate_image.");
+                var pagePlan = new ScanPlan { Items = plan.Items.Skip(offset).Take(limit).ToList() };
+                var byName = imageSummaries.ToDictionary(i => i.Name, StringComparer.Ordinal);
+                int props = 0, canvases = 0, sounds = 0;
 
-                propertyCount += propCount;
-                canvasCount += canvases;
-                soundCount += sounds;
-
-                imageSummaries.Add(new ImageSummary
+                scan = ScanGuard.Run(_session, pagePlan, (img, cat, name) =>
                 {
-                    Name = img.Name,
-                    PropertyCount = propCount,
-                    CanvasCount = canvases,
-                    SoundCount = sounds
+                    var summary = byName[name];
+                    summary.PropertyCount = CountPropertiesRecursive(img, 0, 5);
+                    summary.CanvasCount = CountCanvasesRecursive(img, 0, 10);
+                    summary.SoundCount = CountSoundsRecursive(img, 0, 10);
+                    props += summary.PropertyCount.Value;
+                    canvases += summary.CanvasCount.Value;
+                    sounds += summary.SoundCount.Value;
+                    return false;
                 });
-
-                if (!wasParsed) img.UnparseImage();
+                propertyCount = props;
+                canvasCount = canvases;
+                soundCount = sounds;
             }
 
             return new CategorySummaryResult
             {
                 Success = true,
                 Category = category,
-                ImageCount = images.Count,
+                ImageCount = paths.Count,
+                TotalSizeBytes = totalSize,
                 SubdirectoryCount = subdirs.Count,
-                Subdirectories = subdirs,
+                Subdirectories = subdirs.Take(Paging.DefaultLimit).ToList(),
                 TotalPropertyCount = propertyCount,
                 TotalCanvasCount = canvasCount,
                 TotalSoundCount = soundCount,
+                Returned = imageSummaries.Count,
+                Offset = offset,
+                Limit = limit,
+                HasMore = offset + imageSummaries.Count < paths.Count,
+                NextOffset = Paging.NextOffset(offset, imageSummaries.Count, paths.Count),
                 Images = imageSummaries,
-                Truncated = images.Count > 100
+                Truncated = scan?.BudgetExhausted ?? false,
+                ScannedImages = scan?.Scanned,
+                TotalImages = scan?.Total
             };
         }
         catch (Exception ex)
         {
-            return new CategorySummaryResult { Success = false, Error = ex.Message };
+            return new CategorySummaryResult { Success = false, Error = ex.Message, ErrorCode = ToolErrorException.CodeOf(ex) };
         }
     }
 
-    [McpServerTool(Name = "find_broken_uols"), Description("Find UOL references that don't resolve to valid targets")]
+    [McpServerTool(Name = "find_broken_uols"), Description("Find UOL references that don't resolve to valid targets in one image, or in all images of a category of at most WZIMG_SCAN_MAX_IMAGES (default 150) images")]
     public string FindBrokenUols(
-        [Description("Category to search (optional - searches all if not specified)")] string? category = null,
+        [Description("Category to search (required unless an image is given)")] string? category = null,
         [Description("Specific image to search (optional)")] string? image = null,
         [Description("Maximum results to return (default: 30)")] int maxResults = 30)
     {
@@ -153,52 +177,29 @@ public class AnalysisTools
         try
         {
             var brokenUols = new List<BrokenUol>();
-            var ds = _session.DataSource;
 
-            IEnumerable<string> categories = string.IsNullOrEmpty(category)
-                ? ds.GetCategories()
-                : new[] { category };
-
-            foreach (var cat in categories)
+            var plan = ScanGuard.PlanSearch(_session, category, image,
+                "Narrow it with the image parameter (list_images_in_category pages through the image names of a category), or check a smaller category.");
+            var scan = ScanGuard.Run(_session, plan, (img, cat, name) =>
             {
-                IEnumerable<WzImage> images;
-
-                if (!string.IsNullOrEmpty(image))
-                {
-                    var img = ds.GetImage(cat, image);
-                    images = img != null ? new[] { img } : Enumerable.Empty<WzImage>();
-                }
-                else
-                {
-                    images = ds.GetImagesInCategory(cat);
-                }
-
-                foreach (var img in images)
-                {
-                    var wasParsed = img.Parsed;
-                    if (!img.Parsed) img.ParseImage();
-
-                    FindBrokenUolsRecursive(img, cat, img.Name, "", brokenUols, maxResults);
-
-                    if (!wasParsed) img.UnparseImage();
-
-                    if (brokenUols.Count >= maxResults) break;
-                }
-
-                if (brokenUols.Count >= maxResults) break;
-            }
+                FindBrokenUolsRecursive(img, cat, name, "", brokenUols, maxResults);
+                return brokenUols.Count >= maxResults;
+            });
 
             return new BrokenUolsResult
             {
                 Success = true,
                 Count = brokenUols.Count,
-                Truncated = brokenUols.Count >= maxResults,
+                Truncated = brokenUols.Count >= maxResults || scan.BudgetExhausted,
+                TruncatedReason = scan.BudgetExhausted ? "time_budget" : brokenUols.Count >= maxResults ? "max_results" : null,
+                ScannedImages = scan.Scanned,
+                TotalImages = scan.Total,
                 BrokenUols = brokenUols
             };
         }
         catch (Exception ex)
         {
-            return new BrokenUolsResult { Success = false, Error = ex.Message };
+            return new BrokenUolsResult { Success = false, Error = ex.Message, ErrorCode = ToolErrorException.CodeOf(ex) };
         }
     }
 
@@ -694,31 +695,51 @@ public class CategorySummaryResult : MarkdownResultBase
 {
     public bool Success { get; set; }
     public string? Error { get; set; }
+    public string? ErrorCode { get; set; }
     public string? Category { get; set; }
+    /// <summary>All images of the category.</summary>
     public int ImageCount { get; set; }
+    /// <summary>File size of all images of the category together.</summary>
+    public long TotalSizeBytes { get; set; }
     public int SubdirectoryCount { get; set; }
     public List<string>? Subdirectories { get; set; }
-    public int TotalPropertyCount { get; set; }
-    public int TotalCanvasCount { get; set; }
-    public int TotalSoundCount { get; set; }
+    /// <summary>The three totals count the images of this page and are only given with detailed=true.</summary>
+    public int? TotalPropertyCount { get; set; }
+    public int? TotalCanvasCount { get; set; }
+    public int? TotalSoundCount { get; set; }
+    public int Returned { get; set; }
+    public int Offset { get; set; }
+    public int Limit { get; set; }
+    /// <summary>True when more images follow this page (false is left out of the text).</summary>
+    public bool HasMore { get; set; }
+    public int? NextOffset { get; set; }
     public List<ImageSummary>? Images { get; set; }
+    /// <summary>detailed=true only: the time budget ended the scan before every image of the page was counted.</summary>
     public bool Truncated { get; set; }
+    public int? ScannedImages { get; set; }
+    public int? TotalImages { get; set; }
 }
 
 public class ImageSummary
 {
+    /// <summary>Path of the image inside the category.</summary>
     public required string Name { get; set; }
-    public int PropertyCount { get; set; }
-    public int CanvasCount { get; set; }
-    public int SoundCount { get; set; }
+    public long SizeBytes { get; set; }
+    public int? PropertyCount { get; set; }
+    public int? CanvasCount { get; set; }
+    public int? SoundCount { get; set; }
 }
 
 public class BrokenUolsResult : MarkdownResultBase
 {
     public bool Success { get; set; }
     public string? Error { get; set; }
+    public string? ErrorCode { get; set; }
     public int Count { get; set; }
     public bool Truncated { get; set; }
+    public string? TruncatedReason { get; set; }
+    public int ScannedImages { get; set; }
+    public int TotalImages { get; set; }
     public List<BrokenUol>? BrokenUols { get; set; }
 }
 

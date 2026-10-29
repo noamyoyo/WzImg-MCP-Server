@@ -40,11 +40,16 @@ WORKDIR /app
 COPY --from=build /out/ ./
 RUN mkdir /data && chown 1000:100 /data
 
+# Memory: workstation GC (one heap; the server GC makes a heap per core). DOTNET_GCConserveMemory was tried at 5, 7 and 9
+# against the real 628 MB Map category under --memory 3g: after a memory guard trim the container used 36.5 MiB (not set),
+# 38.6 (5), 36.8 (7) and 39.9 (9), and after eight scans 53.5, 53.0 (7) and 52.8 (9), so it changes nothing here and is left unset.
+# The cache limit, the scan limits and the memory guard are WZIMG_* settings (README-LINUX.md, "Memory and big categories").
 ENV WZIMG_ALLOWED_ROOT=/data \
     WZIMG_PRE_BIG_BANG=1 \
     HOME=/tmp \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
-    DOTNET_EnableDiagnostics=0
+    DOTNET_EnableDiagnostics=0 \
+    DOTNET_gcServer=0
 
 USER 1000:100
 VOLUME /data

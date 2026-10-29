@@ -22,11 +22,50 @@ public class WzSessionManager : IDisposable
     private bool _autoInitialized;
     private bool _disposed;
     private int _openCount;
+    private MemoryGuard _guard;
+    private volatile ScanLimits _scanLimits = ServerSettings.ScanLimitsFromEnvironment();
 
-    public WzSessionManager() { }
+    public WzSessionManager()
+    {
+        _guard = new MemoryGuard(() => _dataSource, ServerSettings.MemoryGuardFromEnvironment());
+    }
 
     /// <summary>Test hook: uses this folder instead of WZIMG_DEFAULT_DATA_PATH for the automatic open.</summary>
-    public WzSessionManager(string? defaultDataPath) { _defaultDataPathOverride = defaultDataPath; }
+    public WzSessionManager(string? defaultDataPath) : this() { _defaultDataPathOverride = defaultDataPath; }
+
+    /// <summary>The guard that trims the cache and the managed heap (its timer runs after <see cref="StartMemoryGuard"/>).</summary>
+    public MemoryGuard MemoryGuard => _guard;
+
+    /// <summary>The current data source, or null. Does not open the default folder.</summary>
+    public IDataSource? CurrentDataSource => _dataSource;
+
+    /// <summary>Test hook: replaces the memory guard (for example one with a fake clock). The old guard is disposed.</summary>
+    public void UseMemoryGuard(MemoryGuard guard)
+    {
+        var old = Interlocked.Exchange(ref _guard, guard);
+        old.Dispose();
+    }
+
+    /// <summary>Starts the memory guard's timer; <paramref name="log"/> gets one line per trim. Called once at startup.</summary>
+    public void StartMemoryGuard(Action<string> log) => _guard.Start(log);
+
+    /// <summary>Records a tool call (the idle trim waits for a quiet period after the last one).</summary>
+    public void Touch() => _guard.Touch();
+
+    /// <summary>Limits of scans and bulk tools (WZIMG_SCAN_MAX_IMAGES and the others). Replaceable for tests.</summary>
+    public ScanLimits ScanLimits
+    {
+        get => _scanLimits;
+        set => _scanLimits = value;
+    }
+
+    /// <summary>
+    /// The current data source as an IMG file system source, which the scan and listing tools need (they list images without
+    /// opening them and open images without caching them). Throws like <see cref="DataSource"/> when none is open.
+    /// </summary>
+    public ImgFileSystemDataSource ImgSource
+        => DataSource as ImgFileSystemDataSource
+            ?? throw new InvalidOperationException("This tool needs an IMG file system data source.");
 
     /// <summary>The folder that is opened automatically when a tool needs the data source and none was opened.</summary>
     public string DefaultDataPath
@@ -50,7 +89,14 @@ public class WzSessionManager : IDisposable
     /// a folder without manifest.json or one outside WZIMG_ALLOWED_ROOT leaves the session uninitialized (the tools
     /// then return their usual "No data source initialized" error) and is retried on the next call.
     /// </summary>
-    public bool IsInitialized => _dataSource?.IsInitialized == true || TryAutoInit();
+    public bool IsInitialized
+    {
+        get
+        {
+            _guard.Touch();
+            return _dataSource?.IsInitialized == true || TryAutoInit();
+        }
+    }
 
     /// <summary>
     /// Gets the current data source (throws if not initialized)
@@ -59,6 +105,7 @@ public class WzSessionManager : IDisposable
     {
         get
         {
+            _guard.Touch();
             if (_dataSource == null) TryAutoInit();
             return _dataSource
                 ?? throw new InvalidOperationException("Data source not initialized. Call init_data_source first.");
@@ -117,7 +164,10 @@ public class WzSessionManager : IDisposable
         }
 
         // Create the new data source first; the existing one is only replaced (and disposed) once this succeeded.
-        var next = new ImgFileSystemDataSource(basePath);
+        // The cache limit comes from WZIMG_CACHE_MB (default 400): the same setting a HaCreatorConfig carries as Cache.MaxMemoryCacheMB.
+        var config = new HaCreatorConfig();
+        config.Cache.MaxMemoryCacheMB = ServerSettings.CacheMb;
+        var next = new ImgFileSystemDataSource(basePath, config);
         DataSourceInfo info;
         try
         {
@@ -303,25 +353,23 @@ public class WzSessionManager : IDisposable
     }
 
     /// <summary>
-    /// Gets a list of all parsed images
+    /// Gets a list of the parsed images. These are the images in the cache: no image is loaded to answer this.
     /// </summary>
     public List<ParsedImageInfo> GetParsedImages()
     {
         var result = new List<ParsedImageInfo>();
 
-        foreach (var category in DataSource.GetCategories())
+        foreach (var cached in ImgSource.GetCachedImages())
         {
-            foreach (var img in DataSource.GetImagesInCategory(category))
+            var img = cached.Image;
+            if (img.Parsed)
             {
-                if (img.Parsed)
+                result.Add(new ParsedImageInfo
                 {
-                    result.Add(new ParsedImageInfo
-                    {
-                        Category = category,
-                        Name = img.Name,
-                        PropertyCount = img.WzProperties?.Count ?? 0
-                    });
-                }
+                    Category = cached.Category,
+                    Name = img.Name,
+                    PropertyCount = img.WzProperties?.Count ?? 0
+                });
             }
         }
 
@@ -344,6 +392,7 @@ public class WzSessionManager : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
+        _guard.Dispose();
         _dataSource?.Dispose();
         _parsedImages.Clear();
         _disposed = true;
