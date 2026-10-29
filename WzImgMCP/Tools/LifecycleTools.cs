@@ -224,22 +224,34 @@ public class LifecycleTools
                 };
             }
 
+            int skipped = 0;
             foreach (var entry in cached)
             {
-                if (entry.Image.Parsed)
+                // Under the lock of the image, and the flag is read again under it: an edit tool that started after the check
+                // above has flagged the image by now, and its edit must not be unparsed away.
+                lock (_session.GateOf(entry.Image))
                 {
-                    entry.Image.UnparseImage();
-                    unloadedCount++;
+                    if (entry.Image.Changed)
+                    {
+                        skipped++;
+                        continue;
+                    }
+                    if (entry.Image.Parsed)
+                    {
+                        entry.Image.UnparseImage();
+                        unloadedCount++;
+                    }
+                    // Out of the cache as well: an unparsed image left there would keep counting at its old size.
+                    source.Manager.RemoveFromCache(entry.Image);
                 }
-                // Out of the cache as well: an unparsed image left there would keep counting at its old size.
-                source.Manager.RemoveFromCache(entry.Image);
             }
 
             return new UnloadResult
             {
                 Success = true,
                 Category = category,
-                UnloadedCount = unloadedCount
+                UnloadedCount = unloadedCount,
+                SkippedEditedCount = skipped
             };
         }
         catch (Exception ex)
@@ -307,6 +319,8 @@ public class UnloadResult : MarkdownResultBase
     public string? Error { get; set; }
     public string? Category { get; set; }
     public int UnloadedCount { get; set; }
+    /// <summary>Images that were edited after the call began and were therefore left alone .</summary>
+    public int SkippedEditedCount { get; set; }
 }
 
 

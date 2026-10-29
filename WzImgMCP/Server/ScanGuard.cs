@@ -128,8 +128,8 @@ public static class ScanGuard
     /// <summary>
     /// Opens the images of a plan one after the other and hands each parsed image to <paramref name="visit"/>
     /// (image, category, name to show); the visitor returns true to stop. At least one image is always scanned; after that the
-    /// time budget (when there is one) is checked before each image. An image that was not cached is disposed after its visit,
-    /// a cached image that was unparsed is unparsed again (unless it has unsaved edits). A bulk tool that works through a
+    /// time budget (when there is one) is checked before each image. An image that was not cached is disposed after its visit;
+    /// a cached image is visited under its lock and left exactly as it is (never unparsed or disposed). A bulk tool that works through a
     /// whole category on purpose passes <paramref name="applyBudget"/> false.
     /// </summary>
     public static ScanOutcome Run(WzSessionManager session, ScanPlan plan, Func<WzImage, string, string, bool> visit, bool applyBudget = true)
@@ -150,7 +150,7 @@ public static class ScanGuard
 
             session.Touch();   // a long scan is activity: the idle trim must not run under it
             WzImage? image = null;
-            bool fromCache = false, wasParsed = true;
+            bool fromCache = false;
             try
             {
                 image = source.OpenImageUncached(item.Category, item.Path, out fromCache);
@@ -160,16 +160,31 @@ public static class ScanGuard
                     continue;
                 }
 
-                wasParsed = image.Parsed;
-                if (!image.Parsed)
-                    image.ParseImage();
-
-                scanned++;
-                if (visit(image, item.Category, item.Display ?? image.Name ?? item.Path))
+                string display = item.Display ?? image.Name ?? item.Path;
+                if (fromCache)
                 {
-                    stopped = true;
-                    break;
+                    // A cached image is shared with the tools that edit it: look at it under its lock, so an edit and this scan never
+                    // interleave, and never unparse it afterwards (it may be being edited now, and an unparse of an edited image
+                    // loses the edit). A cached image that was unparsed stays parsed; the memory guard releases it with the others.
+                    lock (session.GateOf(image))
+                    {
+                        if (!image.Parsed)
+                            image.ParseImage();
+                        scanned++;
+                        stopped = visit(image, item.Category, display);
+                    }
                 }
+                else
+                {
+                    // This scan's own copy: nobody else can see it.
+                    if (!image.Parsed)
+                        image.ParseImage();
+                    scanned++;
+                    stopped = visit(image, item.Category, display);
+                }
+
+                if (stopped)
+                    break;
             }
             catch (ToolErrorException)
             {
@@ -181,13 +196,9 @@ public static class ScanGuard
             }
             finally
             {
-                if (image != null)
-                {
-                    if (!fromCache)
-                        image.Dispose();
-                    else if (!wasParsed && !image.Changed)
-                        image.UnparseImage();
-                }
+                // Only the copies this scan loaded itself are disposed; a cached image is never touched.
+                if (image != null && !fromCache)
+                    image.Dispose();
             }
         }
 

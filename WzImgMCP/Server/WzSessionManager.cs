@@ -291,8 +291,23 @@ public class WzSessionManager : IDisposable
         }
     }
 
+    /// <summary>The per-image locks (see <see cref="ImageGate"/>).</summary>
+    public ImageGate Gate { get; } = new();
+
+    /// <summary>The lock of one image: take it around anything that must not interleave with an edit of that image.</summary>
+    public object GateOf(WzImage image) => Gate.For(image);
+
     /// <summary>
-    /// Gets an image from the current data source, parsing it if necessary
+    /// Test seam: called by <see cref="BeginEdit"/> after it has fetched and parsed the image and before it flags it as changed
+    /// (the window in which a trim, an eviction or a scan used to be able to take the image away), with the attempt number.
+    /// </summary>
+    public Action<WzImage, int>? EditWindowHook { get; set; }
+
+    private const int MaxEditAttempts = 5;
+
+    /// <summary>
+    /// Gets an image from the current data source, parsing it if necessary. A parse of an image that is not parsed yet happens
+    /// under the lock of the image.
     /// </summary>
     public WzImage GetImage(string category, string imageName)
     {
@@ -305,10 +320,60 @@ public class WzSessionManager : IDisposable
         // Ensure the image is parsed
         if (!img.Parsed)
         {
-            img.ParseImage();
+            lock (Gate.For(img))
+            {
+                if (!img.Parsed)
+                    img.ParseImage();
+            }
         }
 
         return img;
+    }
+
+    /// <summary>
+    /// Starts an edit of an image. The invariant: an image is protected BEFORE the tool changes anything. Under the lock of the
+    /// image it is parsed, flagged as changed (the pin the cache honours: eviction, clear_cache and the memory guard's trim never
+    /// drop a changed image), and then looked up in the cache again. If a trim or an eviction took the instance out of the cache
+    /// between the fetch and the flag, the lookup returns another instance and the edit starts over on that one, so a tool never
+    /// edits an orphan. Dispose the result (it holds the lock) and call <see cref="ImageEdit.Commit"/> once the image was changed.
+    /// </summary>
+    public ImageEdit BeginEdit(string category, string imageName)
+    {
+        for (int attempt = 1; attempt <= MaxEditAttempts; attempt++)
+        {
+            var img = DataSource.GetImage(category, imageName)
+                ?? throw new FileNotFoundException($"Image not found: {category}/{imageName}");
+            object gate = Gate.For(img);
+            Monitor.Enter(gate);
+            bool entered = false;
+            try
+            {
+                // ParseImage returns early for an image that is flagged as changed, so it comes first.
+                if (!img.Parsed)
+                    img.ParseImage();
+
+                EditWindowHook?.Invoke(img, attempt);
+
+                bool wasChanged = img.Changed;
+                img.Changed = true;
+                Thread.MemoryBarrier();
+
+                if (ReferenceEquals(DataSource.GetImage(category, imageName), img))
+                {
+                    entered = true;
+                    return new ImageEdit(img, gate, wasChanged);
+                }
+
+                img.Changed = wasChanged;   // an orphan: nobody can reach it any more
+            }
+            finally
+            {
+                if (!entered)
+                    Monitor.Exit(gate);
+            }
+        }
+
+        throw new InvalidOperationException($"{category}/{imageName} left the cache {MaxEditAttempts} times while it was being opened for editing; try again.");
     }
 
     /// <summary>
@@ -341,14 +406,20 @@ public class WzSessionManager : IDisposable
     public void UnparseImage(string category, string imageName)
     {
         var img = DataSource.GetImage(category, imageName);
-        if (img?.Changed == true)
+        if (img == null)
+            return;
+
+        lock (Gate.For(img))
         {
-            // An unparsed image that is still flagged as changed reads back empty and would be saved empty.
-            throw new InvalidOperationException(UnsavedChangesMessage);
-        }
-        if (img?.Parsed == true)
-        {
-            img.UnparseImage();
+            if (img.Changed)
+            {
+                // An unparsed image that is still flagged as changed reads back empty and would be saved empty.
+                throw new InvalidOperationException(UnsavedChangesMessage);
+            }
+            if (img.Parsed)
+            {
+                img.UnparseImage();
+            }
         }
     }
 

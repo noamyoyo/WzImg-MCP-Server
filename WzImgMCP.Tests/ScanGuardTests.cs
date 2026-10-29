@@ -239,7 +239,7 @@ public sealed class ScanGuardTests : IDisposable
     }
 
     [Fact]
-    public void Scan_PutsACachedUnparsedImageBackToUnparsed()
+    public void Scan_NeverUnparsesACachedImage()
     {
         var image = _session.GetImage(ScanTestTree.Category, "m002.img");
         image.UnparseImage();
@@ -247,7 +247,9 @@ public sealed class ScanGuardTests : IDisposable
 
         new NavigationTools(_session).SearchByName("name", ScanTestTree.Category, maxResults: 200);
 
-        Assert.False(image.Parsed);
+        // It may be being edited by another request right now, and unparsing an edited image loses the edit.
+        Assert.True(image.Parsed);
+        Assert.Same(image, _session.DataSource.GetImage(ScanTestTree.Category, "m002.img"));
         Assert.Equal(1, Stats.CachedImageCount);
     }
 

@@ -38,7 +38,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
             var prop = img.GetFromPath(path) as WzStringProperty;
 
             if (prop == null)
@@ -49,7 +50,7 @@ public class ModifyTools
             var oldValue = prop.Value;
             prop.Value = value;
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -78,7 +79,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
             var prop = img.GetFromPath(path);
 
             string? oldValue = null;
@@ -101,7 +103,7 @@ public class ModifyTools
                     return new ModifyResult { Success = false, Error = $"Integer property not found: {path}" };
             }
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -130,7 +132,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
             var prop = img.GetFromPath(path);
 
             string? oldValue = null;
@@ -149,7 +152,7 @@ public class ModifyTools
                     return new ModifyResult { Success = false, Error = $"Float property not found: {path}" };
             }
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -179,7 +182,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
             var prop = img.GetFromPath(path) as WzVectorProperty;
 
             if (prop == null)
@@ -191,7 +195,7 @@ public class ModifyTools
             prop.X.Value = x;
             prop.Y.Value = y;
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -222,7 +226,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
 
             IPropertyContainer parent;
             if (string.IsNullOrEmpty(parentPath))
@@ -256,7 +261,7 @@ public class ModifyTools
 
             parent.AddProperty(newProp);
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new AddPropertyResult
             {
                 Success = true,
@@ -285,7 +290,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
             var prop = img.GetFromPath(path);
 
             if (prop == null)
@@ -301,7 +307,7 @@ public class ModifyTools
 
             parent.RemoveProperty(prop);
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new DeleteResult
             {
                 Success = true,
@@ -329,7 +335,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
             var prop = img.GetFromPath(path);
 
             if (prop == null)
@@ -340,7 +347,7 @@ public class ModifyTools
             var oldName = prop.Name;
             prop.Name = newName;
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new RenameResult
             {
                 Success = true,
@@ -373,15 +380,22 @@ public class ModifyTools
 
         try
         {
+            // The source is read (cloned) under its own lock and the lock is released before the destination is opened for editing,
+            // so two copies in opposite directions cannot wait for each other.
+            WzImageProperty clonedProp;
             var srcImg = _session.GetImage(srcCategory, srcImage);
-            var srcProp = srcImg.GetFromPath(srcPath);
-
-            if (srcProp == null)
+            lock (_session.GateOf(srcImg))
             {
-                return new CopyResult { Success = false, Error = $"Source property not found: {srcPath}" };
+                var srcProp = srcImg.GetFromPath(srcPath);
+                if (srcProp == null)
+                {
+                    return new CopyResult { Success = false, Error = $"Source property not found: {srcPath}" };
+                }
+                clonedProp = srcProp.DeepClone();
             }
 
-            var destImg = _session.GetImage(destCategory, destImage);
+            using var edit = _session.BeginEdit(destCategory, destImage);
+            var destImg = edit.Image;
 
             IPropertyContainer destParent;
             if (string.IsNullOrEmpty(destParentPath))
@@ -399,7 +413,6 @@ public class ModifyTools
                     ?? throw new InvalidOperationException($"Destination is not a property container");
             }
 
-            var clonedProp = srcProp.DeepClone();
             if (!string.IsNullOrEmpty(newName))
             {
                 clonedProp.Name = newName;
@@ -407,7 +420,7 @@ public class ModifyTools
 
             destParent.AddProperty(clonedProp);
 
-            destImg.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new CopyResult
             {
                 Success = true,
@@ -439,7 +452,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
             var prop = img.GetFromPath(path) as WzCanvasProperty;
 
             if (prop == null)
@@ -463,7 +477,7 @@ public class ModifyTools
             prop.PngProperty = pixelTarget;
             note ??= WzImgMCP.Imaging.CanvasImaging.DescribeFormatChange(formatBefore, pixelTarget.Format);
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -494,7 +508,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
             var prop = img.GetFromPath(path) as WzCanvasProperty;
 
             if (prop == null)
@@ -521,7 +536,7 @@ public class ModifyTools
                 oldValue = "(none)";
             }
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new ModifyResult
             {
                 Success = true,
@@ -555,7 +570,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
 
             IPropertyContainer parent;
             if (string.IsNullOrEmpty(parentPath))
@@ -589,7 +605,7 @@ public class ModifyTools
 
             parent.AddProperty(canvas);
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new ImportResult
             {
                 Success = true,
@@ -620,7 +636,8 @@ public class ModifyTools
 
         try
         {
-            var img = _session.GetImage(category, image);
+            using var edit = _session.BeginEdit(category, image);
+            var img = edit.Image;
 
             IPropertyContainer parent;
             if (string.IsNullOrEmpty(parentPath))
@@ -654,7 +671,7 @@ public class ModifyTools
                 try { File.Delete(tempFile); } catch { }
             }
 
-            img.Changed = true; // edits must be re-serialized by save_image / pack_to_wz
+            edit.Commit(); // the image stays flagged as changed: it must be re-serialized by save_image / pack_to_wz
             return new ImportResult
             {
                 Success = true,
@@ -687,8 +704,14 @@ public class ModifyTools
             // spelling of the name was used here. It refuses when that file is gone, never creates folders, and on
             // success drops every cache entry of the image so the next access reads the file that was just written
             // (the in-memory image still points at the old offsets).
+            // Under the lock of the image: a save never serializes an image while an edit tool is half way through changing it.
             var ds = _session.DataSource;
-            if (!ds.SaveImage(category, img))
+            bool saved;
+            lock (_session.GateOf(img))
+            {
+                saved = ds.SaveImage(category, img);
+            }
+            if (!saved)
             {
                 return new SaveResult { Success = false, Error = $"Failed to save {category}/{image}; the file on disk was not changed" };
             }
@@ -729,14 +752,18 @@ public class ModifyTools
             // Reload from disk. Edit tools set Changed, and ParseImage() returns early for a changed image
             // without reading any data, so clear the flag first and force the read. Without this the image
             // stays empty and a later save_image / pack_to_wz writes the empty image.
-            img.Changed = false;
-            if (img.Parsed)
+            // Under the lock of the image, so an edit tool that is changing it finishes first.
+            lock (_session.GateOf(img))
             {
-                img.UnparseImage();
-            }
-            if (!img.ParseImage(forceReadFromData: true) || !img.Parsed)
-            {
-                return new DiscardResult { Success = false, Error = $"Could not reload {category}/{image} from disk" };
+                img.Changed = false;
+                if (img.Parsed)
+                {
+                    img.UnparseImage();
+                }
+                if (!img.ParseImage(forceReadFromData: true) || !img.Parsed)
+                {
+                    return new DiscardResult { Success = false, Error = $"Could not reload {category}/{image} from disk" };
+                }
             }
 
             return new DiscardResult
