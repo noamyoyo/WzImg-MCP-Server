@@ -261,6 +261,7 @@ public sealed class PackerService
             {
                 ErrorLogger.ClearErrors();
             }
+            token.ThrowIfCancellationRequested();   // out of time while extracting: not a statement about the .wz
             if (!extracted)
             {
                 diffs.Add(new PackerDiff(view.Wz.Name, "unreadable", "wz"));
@@ -312,6 +313,10 @@ public sealed class PackerService
                 cache.Clear();
                 ErrorLogger.ClearErrors();
             }
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new ViewerApiException(504, "timeout", "the verify took longer than the time budget");
         }
         finally
         {

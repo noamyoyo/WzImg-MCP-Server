@@ -69,6 +69,10 @@ internal sealed class PackerFixture : IDisposable
         return map;
     }
 
+    /// <summary>Snapshot of the named source roots together, keys prefixed with the source name.</summary>
+    public Dictionary<string, string> SnapshotRoots(params string[] sources)
+        => sources.SelectMany(s => Snapshot(Root(s)).Select(kv => (Key: s + "/" + kv.Key, kv.Value))).ToDictionary(x => x.Key, x => x.Value);
+
     public void Dispose() { try { Directory.Delete(Temp, true); } catch { } }
 }
 
@@ -141,8 +145,8 @@ internal sealed class PackerTestServer : IAsyncDisposable
     }
 
     /// <summary>Pack and wait; returns the finished job.</summary>
-    public async Task<JsonElement> PackAndWait(string person = "owner", string category = PackerFixture.Category)
-        => await WaitForJob(await StartPack(person, category));
+    public async Task<JsonElement> PackAndWait(string person = "owner", string category = PackerFixture.Category, int seconds = 90)
+        => await WaitForJob(await StartPack(person, category), seconds);
 
     public async Task<(HttpStatusCode Status, JsonElement Body)> Verify(string jobId, string person = "owner")
     {
