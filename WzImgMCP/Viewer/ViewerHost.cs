@@ -198,7 +198,7 @@ public static class ViewerHost
         {
             status = "ok",
             version = typeof(ViewerHost).Assembly.GetName().Version?.ToString(3) ?? "unknown",
-            sources = ViewerOptions.SourceNames.ToDictionary(n => n, n => IsReadableDirectory(Path.Combine(o.Roots[n], "img"))),   // what the resolver reads
+            sources = ViewerOptions.SourceNames.ToDictionary(n => n, n => ViewerPathResolver.IsReadableDirectory(Path.Combine(o.Roots[n], "img"))),   // what the resolver reads
         }, Json)).WithMetadata(new NoRequestSlot());
 
         app.MapGet("/v1/resolve", async (HttpContext context, ViewerPathResolver resolver) =>
@@ -266,20 +266,6 @@ public static class ViewerHost
     }
 
     private static string? Single(Microsoft.Extensions.Primitives.StringValues values) => values.Count == 1 ? values[0] : null;
-
-    private static bool IsReadableDirectory(string path)
-    {
-        try
-        {
-            using var entries = Directory.EnumerateFileSystemEntries(path).GetEnumerator();
-            entries.MoveNext();
-            return true;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
 
     private static Task WriteError(HttpContext context, int status, string code, string message)
     {

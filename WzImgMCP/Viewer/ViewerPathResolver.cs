@@ -21,8 +21,9 @@ public sealed record ResolvedImage(string Source, string RelativePath, string Fu
 
 /// <summary>
 /// Turns (source name, relative image path such as <c>String/Consume.img</c>) into a file under that source's
-/// <c>img</c> folder, or throws a <see cref="ViewerApiException"/>: <c>unknown_source</c> (400), <c>bad_path</c> (400)
-/// or <c>not_found</c> (404).
+/// <c>img</c> folder, or throws a <see cref="ViewerApiException"/>: <c>unknown_source</c> (400), <c>bad_path</c> (400),
+/// <c>not_found</c> (404, the file is absent in a readable <c>img</c> folder) or <c>source_unavailable</c> (503, the
+/// <c>img</c> folder itself is missing or cannot be read, for instance a mount that is down; this is NOT "no such file").
 ///
 /// The path must match a strict pattern before the file system is touched: only ASCII letters, digits, space,
 /// '_', '-', '.' and '/' as separator, no empty segment, no segment that starts with '.', last segment ends with
@@ -68,8 +69,8 @@ public class ViewerPathResolver
         {
             if (new FileInfo(imgRoot).LinkTarget != null)
                 throw new ViewerApiException(400, "bad_path", "the source folder is a symbolic link");
-            if (!Directory.Exists(imgRoot))
-                throw new ViewerApiException(404, "not_found", "image not found");
+            if (!Directory.Exists(imgRoot) || !IsReadableDirectory(imgRoot))
+                throw SourceUnavailable();
 
             // Walk down one component at a time, so a link in any parent folder (or in the file itself) is seen.
             for (int i = 0; i < segments.Length; i++)
@@ -85,8 +86,8 @@ public class ViewerPathResolver
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
-            // A folder that cannot be searched or read: to the client the image is simply not there.
-            throw new ViewerApiException(404, "not_found", "image not found");
+            // A folder that cannot be searched or read is a problem of the source, not proof that the image is absent.
+            throw SourceUnavailable();
         }
 
         // Defence in depth: the walk above already refused links, so this holds by construction. Re-check it on the
@@ -119,13 +120,30 @@ public class ViewerPathResolver
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            throw new ViewerApiException(404, "not_found", "image not found");
+            throw SourceUnavailable();
         }
 
         FileIdentity? identity = null;
         try { identity = _fileSystem?.Identity(real); } catch (PlatformNotSupportedException) { }
 
         return new ResolvedImage(source, string.Join('/', segments), real, size, identity);
+    }
+
+    private static ViewerApiException SourceUnavailable() => new(503, "source_unavailable", "the source is not available; retry later");
+
+    /// <summary>True when the folder exists and its entries can be listed.</summary>
+    internal static bool IsReadableDirectory(string path)
+    {
+        try
+        {
+            using var entries = Directory.EnumerateFileSystemEntries(path).GetEnumerator();
+            entries.MoveNext();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     /// <summary>Checks the text rules and returns the segments. Throws <c>bad_path</c>.</summary>

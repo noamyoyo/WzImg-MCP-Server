@@ -227,10 +227,25 @@ public sealed class ViewerPathResolverTests : IDisposable
     }
 
     [Fact]
-    public void MissingImgFolder_IsNotFound()
+    public void MissingImgFolder_IsSourceUnavailable_NotNotFound()
     {
         Directory.Delete(Path.Combine(_canon, "img"), recursive: true);
-        AssertError(Fails("canon", "String/Consume.img"), 404, "not_found");
+        AssertError(Fails("canon", "String/Consume.img"), 503, "source_unavailable");
+    }
+
+    [Fact]
+    public void ImgFolderThatIsAFile_IsSourceUnavailable()
+    {
+        var img = Path.Combine(_canon, "img");
+        Directory.Delete(img, recursive: true);
+        File.WriteAllText(img, "not a folder");
+        AssertError(Fails("canon", "String/Consume.img"), 503, "source_unavailable");
+    }
+
+    [Fact]
+    public void MissingFile_InAReadableImgFolder_StaysNotFound()
+    {
+        AssertError(Fails("canon", "String/Nope.img"), 404, "not_found");
     }
 
     [Fact]

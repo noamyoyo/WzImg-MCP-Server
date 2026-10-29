@@ -145,6 +145,43 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
         Assert.False(removed.GetProperty("now").GetProperty("exists").GetBoolean());
     }
 
+    [Theory]
+    [InlineData("/v1/diff?person=owner&path=A.img")]
+    [InlineData("/v1/resolve?source=canon&path=A.img")]
+    [InlineData("/v1/inspect?source=canon&path=A.img")]
+    public async Task CanonImgRootMissing_Is503_NeverANormalLookingAddedResult(string url)
+    {
+        ImgFixture.Write(_tree.Root("owner"), "A.img", Img(2));
+        Directory.Delete(Path.Combine(_tree.Root("canon"), "img"), recursive: true);   // e.g. the mount is down
+        var s = await Start();
+
+        var (status, body) = await Get(s, url);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, status);
+        Assert.Equal("source_unavailable", body.GetProperty("error").GetProperty("code").GetString());
+        Assert.False(body.TryGetProperty("state", out _));
+    }
+
+    [Fact]
+    public async Task PersonImgRootMissing_Is503_NotRemoved()
+    {
+        ImgFixture.Write(_tree.Root("canon"), "A.img", Img(1));
+        Directory.Delete(Path.Combine(_tree.Root("owner"), "img"), recursive: true);
+        var s = await Start();
+        var (status, body) = await Get(s, "/v1/diff?person=owner&path=A.img");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, status);
+        Assert.Equal("source_unavailable", body.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task FileMissingInAReadableRoot_StillGivesAddedOrRemoved()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "OnlyMine.img", Img(1));
+        var s = await Start();
+        var (status, body) = await Get(s, "/v1/diff?person=owner&path=OnlyMine.img");
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("added", body.GetProperty("state").GetString());
+    }
+
     [Fact]
     public async Task MatchesBase_IsNull_WithoutAMapOrWithoutAnEntry()
     {
