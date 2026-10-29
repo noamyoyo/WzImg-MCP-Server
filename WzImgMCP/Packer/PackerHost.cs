@@ -69,6 +69,7 @@ public static class PackerHost
         Environment.SetEnvironmentVariable(PathGuard.EnvVar, null);
 
         var app = Build(args, options, $"http://{HostUrl.ForUrl(host)}:{port}");
+        app.Services.GetRequiredService<PackerService>().CleanStale();   // what a process that died left behind
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("WzImgMCP.Packer");
         logger.LogInformation("WZ packer starting on http://{Host}:{Port}", host, port);
         foreach (var name in PackerOptions.SourceNames)

@@ -46,8 +46,11 @@ public sealed class PackerService
         _logger = loggers.CreateLogger("WzImgMCP.Packer");
     }
 
-    /// <summary>Test seam: called with "start" (before the work folder is made), "packing" (just before the library packs) and "verify" with the job id.</summary>
+    /// <summary>Test seam: called with "start" (before the work folder is made), "packing" (just before the library packs), "verify" (before the .wz is copied) and "copied" (after it was copied and hashed), with the job id.</summary>
     public Action<string, string>? Probe { get; set; }
+
+    /// <summary>Test seam: sees (and may change) the library's result for the category before the packer judges it.</summary>
+    public Action<CategoryPackingResult>? PackedProbe { get; set; }
 
     // ---------------------------------------------------------------- pack
 
@@ -72,6 +75,9 @@ public sealed class PackerService
         if (!Directory.Exists(categoryDir))
             throw new ViewerApiException(404, "not_found", "category not found");
 
+        if (CountJobFolders() >= _options.MaxJobFolders)
+            throw new ViewerApiException(503, "outbox_full", "the outbox holds too many job folders; the publisher must clean it up");
+
         var lease = _gate.TryEnter() ?? throw Busy();
         PackerJob job;
         try
@@ -91,12 +97,12 @@ public sealed class PackerService
 
     private void RunPack(PackerJob job, string imgRoot, PackerWorkGate.Lease lease)
     {
-        using (lease)   // the slot is given back when the work has really ended, whatever the request did
+        using var cts = new CancellationTokenSource(_options.TimeBudget);
+        var jobDir = _jobs.JobDirectory(job.Id);
+        var work = Path.Combine(jobDir, ".work");
+        _logger.LogInformation("pack {JobId} running", job.Id);
+        try
         {
-            using var cts = new CancellationTokenSource(_options.TimeBudget);
-            var jobDir = _jobs.JobDirectory(job.Id);
-            var work = Path.Combine(jobDir, ".work");
-            _logger.LogInformation("pack {JobId} running", job.Id);
             try
             {
                 job.MarkRunning();
@@ -106,6 +112,10 @@ public sealed class PackerService
                 var images = PackerTree.Enumerate(imgRoot, job.Category, _files, _options, cts.Token);
                 if (images.Count == 0)
                     throw new PackerJobException("empty_category", "the category holds no .img files");
+                // The .wz will be about as big as the images; the outbox disk must have room for it before the library starts writing.
+                var expected = Math.Min(images.Sum(i => i.SizeBytes), _options.MaxWzBytes);
+                if (FreeSpace(_options.Outbox) < expected)
+                    throw new PackerJobException("insufficient_space", "the outbox does not have room for the .wz");
 
                 MakeFreshFolder(work, jobDir);
                 Probe?.Invoke("packing", job.Id);
@@ -117,6 +127,7 @@ public sealed class PackerService
                 cts.Token.ThrowIfCancellationRequested();
 
                 result.CategoriesPacked.TryGetValue(job.Category, out var packed);
+                if (packed != null) PackedProbe?.Invoke(packed);
                 var problems = new List<string>();
                 if (!string.IsNullOrWhiteSpace(result.ErrorMessage)) problems.Add(result.ErrorMessage);
                 if (packed != null) problems.AddRange(packed.Errors);
@@ -126,6 +137,12 @@ public sealed class PackerService
                         job.AddWarning(Scrub(problem));
                     throw new PackerJobException("pack_failed", "packing failed; the warnings say why");
                 }
+                // A .wz with fewer images than the category has must never read as done: a caller that looks only at the state would publish it.
+                if (packed.ImagesPacked != images.Count)
+                {
+                    job.AddWarning($"{images.Count} image file(s) found, {packed.ImagesPacked} packed");
+                    throw new PackerJobException("pack_failed", "packing did not pack every image; the warnings say how many");
+                }
 
                 var produced = Path.Combine(work, job.Category + ".wz");
                 if (!_files.IsRegularFile(produced))
@@ -133,36 +150,38 @@ public sealed class PackerService
                 var size = new FileInfo(produced).Length;
                 if (size > _options.MaxWzBytes)
                     throw new PackerJobException("output_too_large", "the packed .wz is larger than the packer allows");
-                if (packed.ImagesPacked != images.Count)
-                    job.AddWarning($"{images.Count} image file(s) found, {packed.ImagesPacked} packed");
 
                 var final = Path.Combine(jobDir, job.Category + ".wz");
                 File.Move(produced, final, overwrite: false);   // a rename inside the job folder; it never writes through a link
                 var sha = Sha256Of(final);
-                job.Complete(new PackerWz(job.Category + ".wz", size, sha), packed.ImagesPacked);
-                _logger.LogInformation("pack {JobId} done", job.Id);
+                job.StageDone(new PackerWz(job.Category + ".wz", size, sha), packed.ImagesPacked);
             }
             catch (OperationCanceledException)
             {
-                job.Fail("timeout", "the pack took longer than the time budget");
-                _logger.LogWarning("pack {JobId} failed: timeout", job.Id);
+                job.StageFailed("timeout", "the pack took longer than the time budget");
             }
             catch (PackerJobException ex)
             {
-                job.Fail(ex.Code, ex.Message);
-                _logger.LogWarning("pack {JobId} failed: {Code}", job.Id, ex.Code);
+                job.StageFailed(ex.Code, ex.Message);
             }
             catch (Exception ex)
             {
-                job.Fail("internal_error", "the pack failed unexpectedly");
+                job.StageFailed("internal_error", "the pack failed unexpectedly");
                 _logger.LogError("pack {JobId} failed: unhandled exception of type {ExceptionType}", job.Id, ex.GetType().Name);
             }
-            finally
-            {
-                ErrorLogger.ClearErrors();   // MapleLib keeps every logged problem in a list that only grows
-                RemoveWorkFolder(work);
-                _jobs.Persist(job);
-            }
+        }
+        finally
+        {
+            // Order matters. First the folder is cleaned and the final record written, then the work slot is given back, and only then
+            // does the job read "done" or "failed": whoever reacts to that state finds the packer free and the record complete.
+            ErrorLogger.ClearErrors();   // MapleLib keeps every logged problem in a list that only grows
+            RemoveWorkFolder(work);
+            var final = job.FinalView();
+            _jobs.Persist(final);
+            lease.Dispose();
+            job.Publish();
+            if (final.State == PackerJob.Done) _logger.LogInformation("pack {JobId} done", job.Id);
+            else _logger.LogWarning("pack {JobId} failed: {Code}", job.Id, final.Error?.Code);
         }
     }
 
@@ -202,11 +221,50 @@ public sealed class PackerService
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
+    /// <summary>Copies <paramref name="source"/> to the new file <paramref name="target"/> and returns its size and sha256, computed on the bytes that were copied.</summary>
+    private static (long Size, string Sha256) CopyAndHash(string source, string target, CancellationToken cancellationToken)
+    {
+        using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[1024 * 1024];
+        long total = 0;
+        int n;
+        while ((n = input.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            hash.AppendData(buffer, 0, n);
+            output.Write(buffer, 0, n);
+            total += n;
+        }
+        return (total, Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant());
+    }
+
+    /// <summary>True when the file opens with wz version 83 and the key GMS fixed (the extractor on its own detects any version).</summary>
+    private static bool OpensAsVersion83Gms(string path)
+    {
+        try
+        {
+            using var wz = new WzFile(path, (short)WzVersion, WzMapleVersion.GMS);
+            return wz.ParseWzFile() == WzFileParseStatus.Success && wz.Version == WzVersion;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+        finally
+        {
+            ErrorLogger.ClearErrors();
+        }
+    }
+
     // -------------------------------------------------------------- verify
 
     /// <summary>
-    /// Extracts the job's .wz again and compares every .img of it with the person's copy by value, picture and link text
-    /// (the viewer's diff engine). Synchronous; the caller holds the work gate and runs it on its own thread.
+    /// Checks <c>&lt;outbox&gt;/&lt;jobId&gt;/&lt;Category&gt;.wz</c> (the file the publisher will take; the name is never read from the record):
+    /// it is copied once into the temp folder, hashed while it is copied (the hash must be the one the pack recorded), opened with
+    /// version 83 and key GMS fixed, extracted again, and every .img of it is compared with the person's copy by value, picture and link
+    /// text (the viewer's diff engine). Synchronous; the caller holds the work gate and runs it on its own thread.
     /// </summary>
     public PackerVerifyResult Verify(string jobId, string person, CancellationToken cancellationToken)
     {
@@ -214,15 +272,14 @@ public sealed class PackerService
         if (view.State != PackerJob.Done || view.Wz == null)
             throw new ViewerApiException(409, "job_not_done", "the job has not produced a .wz");
 
-        var category = view.Category;
-        var wzPath = Path.Combine(_jobs.JobDirectory(jobId), view.Wz.Name);
-        if (new DirectoryInfo(_jobs.JobDirectory(jobId)).LinkTarget != null
+        var category = view.Category;   // checked as a plain name when the record was loaded
+        var wzName = category + ".wz";
+        var jobDir = _jobs.JobDirectory(jobId);
+        var wzPath = Path.Combine(jobDir, wzName);
+        if (new DirectoryInfo(jobDir).LinkTarget != null
             || new FileInfo(wzPath).LinkTarget != null
             || !_files.IsRegularFile(wzPath))
-            throw new ViewerApiException(409, "output_changed", "the .wz of the job is not the file the pack made");
-        // The file that is verified must be the file the pack recorded (and so the file the publisher will take).
-        if (new FileInfo(wzPath).Length != view.Wz.SizeBytes || !string.Equals(Sha256Of(wzPath), view.Wz.Sha256, StringComparison.Ordinal))
-            throw new ViewerApiException(409, "output_changed", "the .wz of the job is not the file the pack made");
+            throw ChangedOutput();
 
         var imgRoot = ImgRoot(person);
         if (!Directory.Exists(imgRoot) || new DirectoryInfo(imgRoot).LinkTarget != null)
@@ -232,21 +289,50 @@ public sealed class PackerService
         budget.CancelAfter(_options.TimeBudget);
         var token = budget.Token;
         var diffs = new List<PackerDiff>();
-        var tempBase = Path.Combine(_options.TempRoot, "wzpacker-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant());
+        var tempBase = Path.Combine(_options.TempRoot, TempPrefix + Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant());
         try
         {
-            Directory.CreateDirectory(tempBase);
-            Probe?.Invoke("verify", jobId);
+            // 1. the person's copy, listed (a failure here is about the copy, not the .wz)
+            List<PackerImage> mine;
+            try
+            {
+                mine = PackerTree.Enumerate(imgRoot, category, _files, _options, token);
+            }
+            catch (PackerJobException ex)
+            {
+                throw new ViewerApiException(409, ex.Code, ex.Message);
+            }
 
-            // 1. extract the .wz again, into <temp>/img
+            // 2. room in the temp folder for the copy of the .wz and for what it extracts to (about the size of the copy of the person)
+            var needed = view.Wz.SizeBytes + mine.Sum(i => i.SizeBytes);
+            Directory.CreateDirectory(_options.TempRoot);
+            if (FreeSpace(_options.TempRoot) < needed)
+                throw new ViewerApiException(503, "insufficient_space", "the temp folder does not have room to verify this .wz");
+
+            // 3. copy the .wz once; everything below works on the copy, so a writer of the outbox cannot swap the file in between
+            var copyDir = Path.Combine(tempBase, "src");
+            Directory.CreateDirectory(copyDir);
+            var copy = Path.Combine(copyDir, wzName);
+            Probe?.Invoke("verify", jobId);
+            var (copySize, copySha) = CopyAndHash(wzPath, copy, token);
+            if (copySize != view.Wz.SizeBytes || !string.Equals(copySha, view.Wz.Sha256, StringComparison.Ordinal))
+                throw ChangedOutput();   // not the file the pack recorded (and so not the file that would be published)
+            Probe?.Invoke("copied", jobId);
+
+            // 4. it must open as version 83 with the key GMS, then be extracted again into <temp>/img
+            if (!OpensAsVersion83Gms(copy))
+            {
+                diffs.Add(new PackerDiff(wzName, "unreadable", "wz"));
+                return new PackerVerifyResult(false, 0, diffs, false);
+            }
             var wzImgRoot = Path.Combine(tempBase, "img");
             bool extracted;
             try
             {
                 var extractor = new WzExtractionService();
-                var result = extractor.ExtractAsync(Path.GetDirectoryName(wzPath)!, wzImgRoot, "verify", "verify", WzMapleVersion.GMS,
+                var result = extractor.ExtractAsync(copyDir, wzImgRoot, "verify", "verify", WzMapleVersion.GMS,
                     new List<string> { category }, resolveLinks: false, token).GetAwaiter().GetResult();
-                extracted = result.Success && result.CategoriesExtracted.Values.All(c => c.Success && c.Errors.Count == 0)
+                extracted = result.Success && result.CategoriesExtracted.Values.All(c => c.Success && c.Errors.Count == 0 && c.DetectedPatchVersion == WzVersion)
                     && Directory.Exists(Path.Combine(wzImgRoot, category));
             }
             catch (OperationCanceledException)
@@ -264,42 +350,28 @@ public sealed class PackerService
             token.ThrowIfCancellationRequested();   // out of time while extracting: not a statement about the .wz
             if (!extracted)
             {
-                diffs.Add(new PackerDiff(view.Wz.Name, "unreadable", "wz"));
+                diffs.Add(new PackerDiff(wzName, "unreadable", "wz"));
                 return new PackerVerifyResult(false, 0, diffs, false);
             }
 
-            // 2. list both sides
-            List<PackerImage> mine, theirs;
-            try
-            {
-                mine = PackerTree.Enumerate(imgRoot, category, _files, _options, token);
-            }
-            catch (PackerJobException ex)
-            {
-                throw new ViewerApiException(409, ex.Code, ex.Message);
-            }
+            // 5. list the extracted side
+            List<PackerImage> theirs;
             try
             {
                 theirs = PackerTree.Enumerate(wzImgRoot, category, _files, _options, token);
             }
             catch (PackerJobException)
             {
-                diffs.Add(new PackerDiff(view.Wz.Name, "unreadable", "wz"));
+                diffs.Add(new PackerDiff(wzName, "unreadable", "wz"));
                 return new PackerVerifyResult(false, 0, diffs, false);
             }
 
-            // 3. compare one .img at a time with the viewer's engine; "canon" is the person's copy (before), "owner" the re-extracted .wz (now)
+            // 6. compare one .img at a time with the viewer's engine; "canon" is the person's copy (before), "owner" the re-extracted .wz (now)
             var roots = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["canon"] = _options.Roots[person], ["owner"] = tempBase, ["friend"] = tempBase,
             };
-            var viewerOptions = new ViewerOptions("v" + Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant(), roots)
-            {
-                MaxFileBytes = _options.MaxImageBytes,
-                CacheBytes = 128L * 1024 * 1024,
-                MaxChanges = Math.Min(_options.MaxDiffs, ViewerOptions.DefaultMaxChanges),
-                DiffBudget = _options.TimeBudget,
-            };
+            var viewerOptions = ViewerOptionsFor(roots);
             var resolver = new ViewerPathResolver(roots, _files);
             var cache = new ViewerImageCache(viewerOptions.CacheBytes);
             try
@@ -322,6 +394,66 @@ public sealed class PackerService
         {
             try { Directory.Delete(tempBase, recursive: true); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>
+    /// The viewer settings verify runs its diffs with. The viewer's own limits on how many canvases (200) and how many decoded bytes
+    /// (256 MiB) one comparison may decode would make a correct repack of a big image read as <c>pixels_unverified</c> as soon as the
+    /// compressed bytes differ, so they are lifted here; the time budget is what bounds the work.
+    /// </summary>
+    public ViewerOptions ViewerOptionsFor(IReadOnlyDictionary<string, string> roots) => new("v" + Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant(), roots)
+    {
+        MaxFileBytes = _options.MaxImageBytes,
+        CacheBytes = 128L * 1024 * 1024,
+        MaxChanges = Math.Min(_options.MaxDiffs, ViewerOptions.DefaultMaxChanges),
+        DiffBudget = _options.TimeBudget,
+        MaxCanvasDecodes = 1_000_000,
+        MaxDecodedBytes = 256L * 1024 * 1024 * 1024,
+    };
+
+    private static ViewerApiException ChangedOutput() => new(409, "output_changed", "the .wz of the job is not the file the pack made");
+
+    // ------------------------------------------------- start-up and space
+
+    public const string TempPrefix = "wzpacker-";
+    private static readonly Regex TempFolderPattern = new("^wzpacker-[0-9a-f]{16}$", RegexOptions.CultureInvariant);
+
+    /// <summary>Test seam: free bytes on the volume that holds a path. The default asks the file system.</summary>
+    public Func<string, long> FreeSpace { get; set; } = path => new DriveInfo(path).AvailableFreeSpace;
+
+    private int CountJobFolders()
+    {
+        try { return Directory.EnumerateDirectories(_options.Outbox).Take(_options.MaxJobFolders).Count(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { throw new ViewerApiException(503, "outbox_unavailable", "the outbox cannot take a new job"); }
+    }
+
+    /// <summary>
+    /// Run once at start, before any request: a process that died leaves a <c>.work</c> folder in a job folder and a
+    /// <c>wzpacker-*</c> folder in the temp root. Nothing else is touched (job folders and their .wz files stay).
+    /// A link with one of these names is removed as a link, never followed.
+    /// </summary>
+    public void CleanStale()
+    {
+        try
+        {
+            foreach (var job in Directory.EnumerateDirectories(_options.Outbox))
+            {
+                if (PackerJobStore.IsJobId(Path.GetFileName(job)) && new DirectoryInfo(job).LinkTarget == null)
+                    RemoveWorkFolder(Path.Combine(job, ".work"));
+            }
+            if (Directory.Exists(_options.TempRoot))
+                foreach (var dir in Directory.EnumerateFileSystemEntries(_options.TempRoot))
+                {
+                    if (!TempFolderPattern.IsMatch(Path.GetFileName(dir)))
+                        continue;
+                    if (new DirectoryInfo(dir).LinkTarget != null) File.Delete(dir);
+                    else Directory.Delete(dir, recursive: true);
+                }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("cleaning stale folders failed: {ExceptionType}", ex.GetType().Name);
         }
     }
 
