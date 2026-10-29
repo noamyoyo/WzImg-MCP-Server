@@ -37,7 +37,9 @@ public static class PropertyValues
     /// <summary>The children to compare one by one: those of a sub property and of a canvas. A vector and a convex are values.</summary>
     public static IReadOnlyList<WzImageProperty> Children(WzImageProperty p)
     {
-        if (p is WzVectorProperty or WzConvexProperty or WzBinaryProperty)
+        // A UOL is its link text: its WzProperties are its TARGET's children, which are compared where they are (and a UOL to its own
+        // parent or a loop of UOLs would never end).
+        if (p is WzVectorProperty or WzConvexProperty or WzBinaryProperty or WzUOLProperty)
             return Array.Empty<WzImageProperty>();
         return (IReadOnlyList<WzImageProperty>?)p.WzProperties ?? Array.Empty<WzImageProperty>();
     }

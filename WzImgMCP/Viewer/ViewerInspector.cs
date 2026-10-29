@@ -49,6 +49,8 @@ public static class ViewerInspector
                         }
                     }
                 }
+                if (p is WzUOLProperty)
+                    continue;   // a UOL's WzProperties are its target's children (and can loop): a UOL is a node, not a container
                 var children = p.WzProperties;
                 if (children != null)
                     foreach (var c in children) stack.Push(c);

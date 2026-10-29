@@ -43,7 +43,10 @@ public static class ViewerImageSizeEstimator
             if (p is WzStringProperty s)
                 total += CharBytes * (s.Value?.Length ?? 0);
             else if (p is WzUOLProperty u)
+            {
                 total += CharBytes * (u.Value?.Length ?? 0);
+                continue;   // never descend: a UOL's WzProperties are its TARGET's children, so a UOL to its own parent would never end
+            }
             else if (p is WzCanvasProperty)
             {
                 canvases++;
