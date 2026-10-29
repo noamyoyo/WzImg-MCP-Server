@@ -47,23 +47,30 @@ public sealed class ImageDiffer
     private bool _sizeCapped;
 
     /// <summary>A node's path as it is output, and whether any name in it or the whole path was cut.</summary>
-    private readonly record struct NodePath(string Text, bool Cut)
+    /// <param name="Addressable">True when <see cref="Text"/> can be sent to <c>/v1/canvas</c> as a node unchanged (see <see cref="NodeGrammar"/>).</param>
+    private readonly record struct NodePath(string Text, bool Cut, bool Addressable = true)
     {
-        public static readonly NodePath Root = new("", false);
+        public static readonly NodePath Root = new("", false, true);
+
+        /// <summary>The node for this path: the path itself when it is addressable, else null.</summary>
+        public string? Node => Addressable ? Text : null;
 
         public NodePath Child(string name, bool duplicated, int k)
         {
             var (shown, nameCut) = PropertyValues.NameForOutput(name);
             var text = (Text.Length == 0 ? "" : Text + "/") + shown + (duplicated ? "#" + k : "");
             bool cut = Cut || nameCut;
+            // addressable: every name is valid in a node as written (so nothing was replaced, cut, or contains '/' or '#'), and the whole fits a node
+            bool addressable = Addressable && !nameCut && NodeGrammar.IsAddressableName(shown) && text.Length <= NodeGrammar.MaxNodeChars;
             if (text.Length > DiffOptions.MaxPathChars)
             {
                 int length = DiffOptions.MaxPathChars;
                 if (char.IsHighSurrogate(text[length - 1])) length--;
                 text = text.Substring(0, length);
                 cut = true;
+                addressable = false;
             }
-            return new NodePath(text, cut);
+            return new NodePath(text, cut, addressable);
         }
     }
 
@@ -330,7 +337,7 @@ public sealed class ImageDiffer
         {
             if (_canvases.Count >= _options.MaxChanges) { _truncated = true; break; }
             var info = InfoOf(canvas);
-            AddCanvas(new CanvasChange(canvasPath.Text, kind, added ? null : info, added ? info : null));
+            AddCanvas(new CanvasChange(canvasPath.Text, kind, added ? null : info, added ? info : null, canvasPath.Node));
             if (_sizeCapped) break;
         }
     }
@@ -478,12 +485,12 @@ public sealed class ImageDiffer
         else if (pixelsA.Raw == pixelsB.Raw)
         {
             _recompressed++;
-            AddCanvas(new CanvasChange(path.Text, "recompressed", before, after));
+            AddCanvas(new CanvasChange(path.Text, "recompressed", before, after, path.Node));
         }
         else if (pixelsA.Visible == pixelsB.Visible)
         {
             _hiddenColour++;   // listed in canvases only, like recompressed: it is not a visible change, but it is not "identical" either
-            AddCanvas(new CanvasChange(path.Text, "hidden_color", before, after));
+            AddCanvas(new CanvasChange(path.Text, "hidden_color", before, after, path.Node));
         }
         else
             ReportCanvas(path, "pixels", before, after, "canvas");
@@ -491,7 +498,7 @@ public sealed class ImageDiffer
 
     private void ReportCanvas(NodePath path, string detail, CanvasInfo? before, CanvasInfo? after, string type)
     {
-        AddCanvas(new CanvasChange(path.Text, detail, before, after));
+        AddCanvas(new CanvasChange(path.Text, detail, before, after, path.Node));
         AddChange(new DiffChange
         {
             Path = path.Text, PathTruncated = path.Cut ? true : null, Kind = "changed", Type = type,

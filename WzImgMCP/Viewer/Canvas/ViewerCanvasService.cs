@@ -25,7 +25,7 @@ public sealed record CanvasRender(byte[] Png, int Width, int Height, int OutputW
 ///
 /// Rules:
 /// <list type="bullet">
-/// <item><c>node</c> is a property path inside the image: ASCII letters, digits, space, '_', '-', '.', '/' as separator, at most 200 characters, no empty segment, no "." or ".." segment and no ".." anywhere.
+/// <item><c>node</c> is a property path inside the image (see <see cref="NodeGrammar"/>): ASCII letters, digits, space, '_', '-', '.', '/' as separator, an optional '#k' on a segment for the k-th child of that name, at most 200 characters, no empty segment, no "." or ".." segment and no ".." anywhere.
 /// A bad pattern is <c>bad_path</c> (400). A node that does not exist, or is not a canvas (or, for frames, not a container), is <c>not_found</c> (404): one answer, whatever the reason.</item>
 /// <item>UOLs on the way and as the node itself are followed inside the same image. A canvas with <c>_inlink</c> is followed inside its image;
 /// one with <c>_outlink</c> through <see cref="ViewerLinkContext"/>, so only inside the request's own source and through the same path rules and safe reader. No other link is ever read.</item>
@@ -38,7 +38,7 @@ public sealed record CanvasRender(byte[] Png, int Width, int Height, int OutputW
 /// </summary>
 public sealed class ViewerCanvasService
 {
-    public const int MaxNodeChars = 200;
+    public const int MaxNodeChars = NodeGrammar.MaxNodeChars;
     public const int DefaultMaxSide = 1024;
     public const int FullMaxSide = 4096;
     public const int MaxFrames = 512;
@@ -62,24 +62,8 @@ public sealed class ViewerCanvasService
 
     // ---- request parameters
 
-    /// <summary>Checks the node pattern and returns its segments. Throws <c>bad_path</c>.</summary>
-    public static string[] ParseNode(string? node)
-    {
-        if (string.IsNullOrEmpty(node))
-            throw new ViewerApiException(400, "bad_path", "node is empty");
-        if (node.Length > MaxNodeChars)
-            throw new ViewerApiException(400, "bad_path", $"node is longer than {MaxNodeChars} characters");
-        foreach (var c in node)
-            if (!(char.IsAsciiLetterOrDigit(c) || c is ' ' or '_' or '-' or '.' or '/'))
-                throw new ViewerApiException(400, "bad_path", "node contains a character that is not allowed");
-        if (node.Contains("..", StringComparison.Ordinal))
-            throw new ViewerApiException(400, "bad_path", "node must not contain '..'");
-        var segments = node.Split('/');
-        foreach (var segment in segments)
-            if (segment.Length == 0 || segment == ".")
-                throw new ViewerApiException(400, "bad_path", "node has an empty segment or starts or ends with '/'");
-        return segments;
-    }
+    /// <summary>Checks the node grammar (see <see cref="NodeGrammar"/>) and returns its segments. Throws <c>bad_path</c>.</summary>
+    public static NodeSegment[] ParseNode(string? node) => NodeGrammar.Parse(node);
 
     /// <summary>The longest side of the PNG for <c>maxSide</c>: omitted or "1024" is 1024, "full" is 4096. Anything else is <c>bad_request</c>.</summary>
     public static int ParseMaxSide(string? maxSide, out string normalized)
@@ -124,7 +108,7 @@ public sealed class ViewerCanvasService
 
     // ---- /v1/canvas
 
-    public CanvasRender Render(ResolvedImage image, string[] node, string nodeText, int maxSide, string maxSideText, ViewerLinkContext links, CancellationToken cancellationToken)
+    public CanvasRender Render(ResolvedImage image, NodeSegment[] node, string nodeText, int maxSide, string maxSideText, ViewerLinkContext links, CancellationToken cancellationToken)
     {
         byte[] bgra;
         int width, height, originX, originY;
@@ -178,7 +162,7 @@ public sealed class ViewerCanvasService
 
     // ---- /v1/frames
 
-    public FramesResult Frames(ResolvedImage image, string[] node, string nodeText, ViewerLinkContext links, CancellationToken cancellationToken)
+    public FramesResult Frames(ResolvedImage image, NodeSegment[] node, string nodeText, ViewerLinkContext links, CancellationToken cancellationToken)
     {
         using var lease = _loader.Load(image, cancellationToken);
         var loaded = lease.Loaded;
@@ -237,7 +221,7 @@ public sealed class ViewerCanvasService
     private sealed record CanvasSource(LoadedImage Owner, WzPngProperty Png, int Width, int Height, int OriginX, int OriginY, int? DelayMs, bool ViaOutlink);
 
     /// <summary>The canvas at <paramref name="node"/>, or null (no such node, not a canvas, no pixel data, a link that does not resolve).</summary>
-    private CanvasSource? Locate(LoadedImage loaded, string[] node, ViewerLinkContext links, CancellationToken cancellationToken)
+    private CanvasSource? Locate(LoadedImage loaded, NodeSegment[] node, ViewerLinkContext links, CancellationToken cancellationToken)
     {
         WzImageProperty? start;
         lock (loaded.Sync)
@@ -245,8 +229,8 @@ public sealed class ViewerCanvasService
         return start == null ? null : Describe(loaded, start, links, cancellationToken);
     }
 
-    /// <summary>Walks the segments from the top of the image (the first child of that name at each level), following UOLs. Call under the image's Sync.</summary>
-    private static WzImageProperty? FollowTo(LoadedImage loaded, string[] node, CancellationToken cancellationToken)
+    /// <summary>Walks the segments from the top of the image (the k-th child of that name at each level, the first for a bare name), following UOLs. Call under the image's Sync.</summary>
+    private static WzImageProperty? FollowTo(LoadedImage loaded, NodeSegment[] node, CancellationToken cancellationToken)
     {
         IEnumerable<WzImageProperty>? children = loaded.Image.WzProperties;
         WzImageProperty? current = null;
@@ -255,7 +239,8 @@ public sealed class ViewerCanvasService
             cancellationToken.ThrowIfCancellationRequested();
             if (children == null)
                 return null;
-            current = children.FirstOrDefault(c => string.Equals(c.Name, segment, StringComparison.Ordinal));
+            // name#k: the k-th child with exactly that name, in file order (a bare name is the first)
+            current = children.Where(c => string.Equals(c.Name, segment.Name, StringComparison.Ordinal)).Skip(segment.Index).FirstOrDefault();
             current = FollowUol(loaded.Image, current);
             if (current == null)
                 return null;

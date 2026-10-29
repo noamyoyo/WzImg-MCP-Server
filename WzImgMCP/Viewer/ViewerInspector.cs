@@ -17,6 +17,16 @@ public static class ViewerInspector
     /// <summary>Most outlinks resolved per request (each can open another image).</summary>
     public const int MaxOutlinksChecked = 200;
 
+    /// <summary>
+    /// Whether the canvas's link leads somewhere. MapleLib casts the link property to a string property without checking, so a crafted
+    /// file with another type there throws InvalidCastException: such a link is simply unresolved.
+    /// </summary>
+    private static bool LinkResolves(WzCanvasProperty canvas)
+    {
+        try { return !ReferenceEquals(canvas.GetLinkedWzImageProperty(), canvas); }
+        catch (InvalidCastException) { return false; }
+    }
+
     public static InspectResult Inspect(ViewerImageLoader loader, ResolvedImage resolved, ViewerLinkContext links, CancellationToken cancellationToken)
     {
         using var lease = loader.Load(resolved, cancellationToken);
@@ -44,7 +54,7 @@ public static class ViewerInspector
                         if (checkedOutlinks < MaxOutlinksChecked)
                         {
                             checkedOutlinks++;
-                            if (!ReferenceEquals(canvas.GetLinkedWzImageProperty(), canvas))
+                            if (LinkResolves(canvas))
                                 resolvedOutlinks++;
                         }
                     }

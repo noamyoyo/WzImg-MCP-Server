@@ -31,7 +31,13 @@ public sealed record CanvasInfo(int Width, int Height, int Format);
 /// "hidden_color" (the visible pixels are equal; only the colour of fully transparent pixels differs), or
 /// "recompressed" (other bytes, the very same pixels: not a change).
 /// </summary>
-public sealed record CanvasChange(string Path, string Change, CanvasInfo? Before, CanvasInfo? After);
+/// <remarks>
+/// <c>Node</c> is what to pass as <c>node</c> to <c>/v1/canvas</c> and <c>/v1/frames</c>: equal to <c>Path</c> when the path can be sent
+/// unchanged (every name valid in the node grammar, nothing cut, no name containing '/' or '#', at most 200 characters), else null: the
+/// panel then has no preview for that canvas. Fetch from the person's file for <c>added</c>, from canon for <c>removed</c>, from both
+/// otherwise; a side that has fewer same-named siblings answers 404 for <c>name#k</c> and is shown as missing.
+/// </remarks>
+public sealed record CanvasChange(string Path, string Change, CanvasInfo? Before, CanvasInfo? After, string? Node = null);
 
 public sealed record DiffSummary(int Added, int Removed, int Changed, int CanvasesChanged, int CanvasesRecompressed, int CanvasesHiddenColour = 0);
 

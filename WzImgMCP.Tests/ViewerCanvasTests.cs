@@ -731,6 +731,195 @@ public sealed class ViewerCanvasTests : IAsyncLifetime
         await AssertError(s, Url(node: "self"), HttpStatusCode.NotFound, "not_found");
     }
 
+    // ---- node with #k, and the node of a diff's canvases[] entry
+
+    /// <summary>AddProperty refuses a second property of one name, a file can still hold one.</summary>
+    private static void Dup(WzImage img, WzImageProperty p) => img.WzProperties.Add(p);
+
+    private static WzCanvasProperty Shade(string name, byte shade, int size = 4)
+        => Cv(name, size, size, pixel: (x, y) => (shade, shade, shade, (byte)255));
+
+    [Fact]
+    public async Task NodeWithAnIndex_SelectsTheKthChildOfThatName_AndABareNameTheFirst()
+    {
+        Write("owner", "Mob/T.img", img =>
+        {
+            Dup(img, Shade("a", 10)); Dup(img, Shade("a", 100)); Dup(img, Shade("a", 200));
+            var s1 = new WzSubProperty("grp"); s1.AddProperty(Shade("c", 30)); Dup(img, s1);
+            var s2 = new WzSubProperty("grp"); s2.AddProperty(Shade("c", 130)); Dup(img, s2);
+        });
+        var s = await Start();
+        async Task<int> Blue(string node)
+        {
+            var response = await s.Client.GetAsync(Url(node: node));
+            Assert.True(response.StatusCode == HttpStatusCode.OK, $"{node}: {response.StatusCode}");
+            using var bitmap = DecodePng(await response.Content.ReadAsByteArrayAsync());
+            return bitmap.GetPixel(0, 0).Blue;
+        }
+        Assert.Equal(10, await Blue("a"));
+        Assert.Equal(10, await Blue("a%230"));
+        Assert.Equal(100, await Blue("a%231"));
+        Assert.Equal(200, await Blue("a%232"));
+        Assert.Equal(30, await Blue("grp/c"));
+        Assert.Equal(130, await Blue("grp%231/c"));
+        await AssertError(s, Url(node: "a%233"), HttpStatusCode.NotFound, "not_found");       // only three
+        await AssertError(s, Url(node: "grp%232/c"), HttpStatusCode.NotFound, "not_found");
+    }
+
+    [Theory]
+    [InlineData("a%2301")]
+    [InlineData("a%23")]
+    [InlineData("%231")]
+    [InlineData("a%231%232")]
+    [InlineData("a%239999999")]
+    public async Task NodeWithABadIndex_IsBadPath(string node)
+    {
+        Write("owner", "Mob/T.img", img => Dup(img, Shade("a", 10)));
+        var s = await Start();
+        await AssertError(s, Url(node: node), HttpStatusCode.BadRequest, "bad_path");
+    }
+
+    [Fact]
+    public async Task Frames_OfAnIndexedNode_ListTheKthParent()
+    {
+        Write("owner", "Mob/T.img", img =>
+        {
+            var one = new WzSubProperty("anim"); one.AddProperty(Shade("0", 10)); Dup(img, one);
+            var two = new WzSubProperty("anim"); two.AddProperty(Shade("0", 20)); two.AddProperty(Shade("1", 30)); Dup(img, two);
+        });
+        var s = await Start();
+        Assert.Equal(1, (await Frames(s, "anim")).GetProperty("frames").GetArrayLength());
+        var second = await Frames(s, "anim%231");
+        Assert.Equal(2, second.GetProperty("frames").GetArrayLength());
+        Assert.Equal("anim#1/1", second.GetProperty("frames")[1].GetProperty("node").GetString());   // and that node renders
+        Assert.Equal(HttpStatusCode.OK, (await s.Client.GetAsync(Url(node: "anim%231/1"))).StatusCode);
+    }
+
+    private static string Escape(string node) => node.Replace("#", "%23");
+
+    [Fact]
+    public async Task EveryNonNullNodeOfADiff_CanBeFetched_AndTheOthersAreNull()
+    {
+        var longName = new string('n', 150);
+        void Fill(WzImage img, byte shade)
+        {
+            Dup(img, Shade("dup", shade)); Dup(img, Shade("dup", (byte)(shade + 1)));       // duplicate names: dup#0, dup#1
+            var anim = new WzSubProperty("anim"); anim.AddProperty(Shade("0", shade)); anim.AddProperty(Shade("1", shade)); img.AddProperty(anim);
+            img.AddProperty(Shade("plain", shade));
+            img.AddProperty(Shade("na me.v-1_x", shade));                                   // every allowed character
+            Dup(img, Shade("\u540d\u524d", shade));                                         // not ASCII
+            Dup(img, Shade(longName, shade));                                              // cut at 100
+            Dup(img, Shade("x/y", shade));                                                 // contains '/'
+            Dup(img, Shade("lit#1", shade));                                               // contains '#'
+            Dup(img, Shade("a..b", shade));                                                // would be refused as '..'
+            var deep = new WzSubProperty(new string('d', 90));
+            var cursor = deep;
+            for (int i = 0; i < 2; i++) { var next = new WzSubProperty(new string((char)('e' + i), 90)); cursor.AddProperty(next); cursor = next; }
+            cursor.AddProperty(Shade("leaf", shade));                                      // a path of 272 characters: over 200
+            img.AddProperty(deep);
+        }
+        Write("canon", "Mob/T.img", img => Fill(img, 10));
+        Write("owner", "Mob/T.img", img =>
+        {
+            Fill(img, 90);
+            var added = new WzSubProperty("brandnew"); added.AddProperty(Shade("0", 50)); added.AddProperty(Shade("1", 60)); img.AddProperty(added);
+        });
+        var s = await Start(_tree.Options(timeout: TimeSpan.FromSeconds(60)));
+
+        var (status, diff) = await GetJson(s, "/v1/diff?person=owner&path=Mob/T.img");
+        Assert.Equal(HttpStatusCode.OK, status);
+        var entries = diff.GetProperty("canvases").EnumerateArray().Select(e => (
+            Path: e.GetProperty("path").GetString()!, Node: e.GetProperty("node").GetString(), Change: e.GetProperty("change").GetString()!)).ToList();
+
+        var nodes = entries.Where(e => e.Node != null).ToList();
+        Assert.Contains(nodes, e => e.Path == "dup#0");
+        Assert.Contains(nodes, e => e.Path == "dup#1");
+        Assert.Contains(nodes, e => e.Path == "anim/1");
+        Assert.Contains(nodes, e => e.Path == "plain");
+        Assert.Contains(nodes, e => e.Path == "na me.v-1_x");
+        Assert.Contains(nodes, e => e.Path == "brandnew/0" && e.Change == "added");
+        Assert.All(nodes, e => Assert.Equal(e.Path, e.Node));          // the node IS the path when it can be sent as it is
+
+        // the ones that cannot be sent say so
+        foreach (var path in new[] { "\u540d\u524d", "x/y", "lit#1", "a..b" })
+            Assert.Null(entries.Single(e => e.Path == path).Node);
+        Assert.Null(entries.Single(e => e.Path.StartsWith(new string('n', 100))).Node);
+        Assert.Null(entries.Single(e => e.Path.Length > 200).Node);
+
+        // and every node that was given returns the picture, from the side(s) the entry names
+        foreach (var e in nodes)
+        {
+            foreach (var source in e.Change == "added" ? new[] { "owner" } : e.Change == "removed" ? new[] { "canon" } : new[] { "canon", "owner" })
+            {
+                var response = await s.Client.GetAsync(Url(node: Escape(e.Node!), source: source));
+                Assert.True(response.StatusCode == HttpStatusCode.OK, $"{source} {e.Node}: {response.StatusCode}");
+                Assert.Equal("image/png", response.Content.Headers.ContentType!.MediaType);
+            }
+        }
+
+        // the k-th pairing really is by position on both sides: dup#1 is the second in each file
+        using var canonSecond = DecodePng(await (await s.Client.GetAsync(Url(node: "dup%231", source: "canon"))).Content.ReadAsByteArrayAsync());
+        using var ownerSecond = DecodePng(await (await s.Client.GetAsync(Url(node: "dup%231", source: "owner"))).Content.ReadAsByteArrayAsync());
+        Assert.Equal((11, 91), (canonSecond.GetPixel(0, 0).Blue, ownerSecond.GetPixel(0, 0).Blue));
+    }
+
+    [Fact]
+    public async Task ARemovedEntry_IsFetchedFromCanon_AndNotFoundInThePersonsFile()
+    {
+        Write("canon", "Mob/T.img", img => { Dup(img, Shade("gone", 10)); Dup(img, Shade("gone", 20)); });
+        Write("owner", "Mob/T.img", img => Dup(img, Shade("gone", 10)));   // the person deleted the second one
+        var s = await Start();
+        var (_, diff) = await GetJson(s, "/v1/diff?person=owner&path=Mob/T.img");
+        var removed = diff.GetProperty("canvases").EnumerateArray().Single(e => e.GetProperty("change").GetString() == "removed");
+        Assert.Equal("gone#1", removed.GetProperty("node").GetString());
+        Assert.Equal(HttpStatusCode.OK, (await s.Client.GetAsync(Url(node: "gone%231", source: "canon"))).StatusCode);
+        await AssertError(s, Url(node: "gone%231", source: "owner"), HttpStatusCode.NotFound, "not_found");   // that side lacks it
+    }
+
+    [Fact]
+    public async Task TypeChange_ListsCanvasesWithTheirNodes()
+    {
+        Write("canon", "Mob/T.img", img => { var a = new WzSubProperty("stand"); a.AddProperty(Shade("0", 10)); a.AddProperty(Shade("1", 20)); img.AddProperty(a); });
+        Write("owner", "Mob/T.img", img => img.AddProperty(new WzStringProperty("stand", "gone")));
+        var s = await Start();
+        var (_, diff) = await GetJson(s, "/v1/diff?person=owner&path=Mob/T.img");
+        var nodes = diff.GetProperty("canvases").EnumerateArray().Select(e => e.GetProperty("node").GetString()).ToList();
+        Assert.Equal(new[] { "stand/0", "stand/1" }, nodes);
+        Assert.Equal(HttpStatusCode.OK, (await s.Client.GetAsync(Url(node: "stand/1", source: "canon"))).StatusCode);
+    }
+
+    // ---- crafted links (F24)
+
+    [Fact]
+    public async Task LinkPropertyThatIsNotAString_IsAnUnresolvedLink_NotA500()
+    {
+        Write("owner", "Mob/T.img", img =>
+        {
+            foreach (var name in new[] { "_inlink", "_outlink" })
+            {
+                var c = Shade("bad" + name, 10);
+                c.AddProperty(new WzIntProperty(name, 7));   // the library casts this to a string property without looking
+                img.AddProperty(c);
+            }
+            var a = new WzSubProperty("anim");
+            var f = Shade("0", 10);
+            f.AddProperty(new WzIntProperty("_outlink", 7));
+            a.AddProperty(f);
+            a.AddProperty(Shade("1", 20));
+            img.AddProperty(a);
+        });
+        Write("canon", "Mob/T.img", img => img.AddProperty(Shade("other", 10)));
+        var s = await Start();
+        await AssertError(s, Url(node: "bad_inlink"), HttpStatusCode.NotFound, "not_found");
+        await AssertError(s, Url(node: "bad_outlink"), HttpStatusCode.NotFound, "not_found");
+        var frames = await Frames(s, "anim");
+        Assert.Equal(new[] { 1 }, frames.GetProperty("frames").EnumerateArray().Select(x => x.GetProperty("index").GetInt32()));   // the broken frame is skipped
+        var (status, inspect) = await GetJson(s, "/v1/inspect?source=owner&path=Mob/T.img");
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(0, inspect.GetProperty("links").GetProperty("outlinksResolved").GetInt32());
+        Assert.Equal(HttpStatusCode.OK, (await s.Client.GetAsync("/v1/diff?person=owner&path=Mob/T.img")).StatusCode);
+    }
+
     // ---- /v1/frames
 
     private static async Task<JsonElement> Frames(ViewerTestServer s, string node, string path = "Mob/T.img", string source = "owner")
@@ -1079,10 +1268,36 @@ public sealed class ViewerCanvasTests : IAsyncLifetime
     // ---- node and ETag helpers
 
     [Theory]
-    [InlineData("stand", new[] { "stand" })]
-    [InlineData("a/b/c", new[] { "a", "b", "c" })]
-    [InlineData("a b/c.d_e-f", new[] { "a b", "c.d_e-f" })]
-    public void ParseNode_Accepts(string node, string[] segments) => Assert.Equal(segments, ViewerCanvasService.ParseNode(node));
+    [InlineData("stand", "stand:0")]
+    [InlineData("a/b/c", "a:0,b:0,c:0")]
+    [InlineData("a b/c.d_e-f", "a b:0,c.d_e-f:0")]
+    [InlineData("a#0", "a:0")]
+    [InlineData("a#1", "a:1")]
+    [InlineData("a#999999", "a:999999")]
+    [InlineData("x/a#12/b#3", "x:0,a:12,b:3")]
+    public void ParseNode_Accepts(string node, string expected)
+        => Assert.Equal(expected, string.Join(',', ViewerCanvasService.ParseNode(node).Select(x => $"{x.Name}:{x.Index}")));
+
+    [Theory]
+    [InlineData("a#01")]
+    [InlineData("a#00")]
+    [InlineData("a#")]
+    [InlineData("#1")]
+    [InlineData("#")]
+    [InlineData("a#1#2")]
+    [InlineData("a##1")]
+    [InlineData("a#9999999")]
+    [InlineData("a#-1")]
+    [InlineData("a#1a")]
+    [InlineData("a#1.5")]
+    [InlineData("a#+1")]
+    [InlineData("a/#1")]
+    [InlineData("a#1/")]
+    public void ParseNode_RefusesABadIndex(string node)
+    {
+        var ex = Assert.Throws<ViewerApiException>(() => ViewerCanvasService.ParseNode(node));
+        Assert.Equal((400, "bad_path"), (ex.Status, ex.Code));
+    }
 
     [Fact]
     public void ParseMaxSide_Rules()
