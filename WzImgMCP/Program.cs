@@ -7,6 +7,7 @@ using ModelContextProtocol.Server;
 using WzImgMCP.Server;
 using WzImgMCP.Tools;
 using WzImgMCP.Utils;
+using WzImgMCP.Packer;
 using WzImgMCP.Viewer;
 
 namespace WzImgMCP;
@@ -17,10 +18,26 @@ class Program
     {
         ServerSettings.Apply();   // WZIMG_PRE_BIG_BANG: no DXT in the automatic format choice
 
+        bool viewer = args.Any(a => a.Equals("--viewer", StringComparison.OrdinalIgnoreCase));
+        bool packer = args.Any(a => a.Equals("--packer", StringComparison.OrdinalIgnoreCase));
+        if (viewer && packer)
+        {
+            Console.Error.WriteLine("--viewer and --packer cannot be used together.");
+            Environment.ExitCode = 2;
+            return;
+        }
+
         // --viewer: the read-only viewer service. It has its own service graph (no MCP, no tools), see ViewerHost.
-        if (args.Any(a => a.Equals("--viewer", StringComparison.OrdinalIgnoreCase)))
+        if (viewer)
         {
             await RunViewerServer(args);
+            return;
+        }
+
+        // --packer: the pack and verify service. Same idea: its own service graph, no MCP, no tools, see PackerHost.
+        if (packer)
+        {
+            await RunPackerServer(args);
             return;
         }
 
@@ -136,6 +153,13 @@ class Program
         var host = ParseHost(args, ViewerOptions.DefaultHost);
         var port = ParsePort(args, ViewerOptions.DefaultPort);
         Environment.ExitCode = await ViewerHost.RunAsync(args, host, port, Environment.GetEnvironmentVariable);
+    }
+
+    private static async Task RunPackerServer(string[] args)
+    {
+        var host = ParseHost(args, PackerOptions.DefaultHost);
+        var port = ParsePort(args, PackerOptions.DefaultPort);
+        Environment.ExitCode = await PackerHost.RunAsync(args, host, port, Environment.GetEnvironmentVariable);
     }
 
     private static TransportMode ParseTransportMode(string[] args)
