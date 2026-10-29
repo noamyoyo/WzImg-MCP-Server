@@ -451,6 +451,61 @@ public static class CanvasImaging
         return data.ToArray();
     }
 
+    /// <summary>PNG bytes of straight-alpha BGRA32 pixels (the viewer's picture endpoint).</summary>
+    public static byte[] EncodeBgraToPng(byte[] bgra, int width, int height) => SkiaEncode(bgra, width, height, ExportImageFormat.Png);
+
+    /// <summary>PNG bytes of straight-alpha BGRA32 pixels scaled to <paramref name="newWidth"/> x <paramref name="newHeight"/>.</summary>
+    public static byte[] ScaleBgraToPng(byte[] bgra, int width, int height, int newWidth, int newHeight)
+    {
+        if ((long)width * height * 4 != bgra.Length)
+            throw new ArgumentException("The pixel buffer does not match the dimensions.");
+        return SkiaScaleToPngStepped(bgra, width, height, newWidth, newHeight);
+    }
+
+    /// <summary>
+    /// Scales in steps of at most 2x per axis (so a big reduction is still filtered properly without mipmaps) and wraps the managed
+    /// pixel array instead of copying it: only the shrinking intermediate images are allocated.
+    /// </summary>
+    private static byte[] SkiaScaleToPngStepped(byte[] bgra, int width, int height, int newWidth, int newHeight)
+    {
+        var info = new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Unpremul);
+        GCHandle handle = GCHandle.Alloc(bgra, GCHandleType.Pinned);
+        try
+        {
+            SKImage current = SKImage.FromPixels(info, handle.AddrOfPinnedObject(), width * 4);   // not copied
+            try
+            {
+                int w = width, h = height;
+                while (w != newWidth || h != newHeight)
+                {
+                    int nw = Math.Max(newWidth, (w + 1) / 2), nh = Math.Max(newHeight, (h + 1) / 2);
+                    using var surface = SKSurface.Create(new SKImageInfo(nw, nh, SKColorType.Bgra8888, SKAlphaType.Premul));
+                    if (surface == null)
+                        throw new InvalidOperationException("Could not allocate the scaled image.");
+                    surface.Canvas.Clear(SKColors.Transparent);
+                    surface.Canvas.DrawImage(current, new SKRect(0, 0, nw, nh), new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None));
+                    var next = surface.Snapshot();
+                    current.Dispose();
+                    current = next;
+                    w = nw;
+                    h = nh;
+                }
+                using var data = current.Encode(SKEncodedImageFormat.Png, 100);
+                if (data == null)
+                    throw new InvalidOperationException("Encoding the scaled image failed.");
+                return data.ToArray();
+            }
+            finally
+            {
+                current.Dispose();
+            }
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+
     private static byte[] SkiaDecodePng(byte[] png, int declaredWidth, int declaredHeight, out int width, out int height)
     {
         using var data = SKData.CreateCopy(png);
