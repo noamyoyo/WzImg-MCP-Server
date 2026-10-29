@@ -445,7 +445,8 @@ public sealed class CanvasImagingTests : IClassFixture<TestFixture>, IDisposable
         var notCanvas = _image.ViewCanvas(Cat, Img, "testString");
         Assert.True(notCanvas.IsError);
 
-        var uninitialised = new ImageTools(new WzSessionManager()).ViewCanvas(Cat, Img, "testCanvas");
+        // default folder pointed at a missing folder, so a /data/img on the host cannot be opened automatically
+        var uninitialised = new ImageTools(new WzSessionManager(Path.Combine(_outside, "no-data-here"))).ViewCanvas(Cat, Img, "testCanvas");
         Assert.True(uninitialised.IsError);
         Assert.Contains("No data source", uninitialised.Content[0].Text);
     }

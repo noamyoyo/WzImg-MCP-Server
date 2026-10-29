@@ -168,6 +168,75 @@ public sealed class AutoDataSourceTests : IDisposable
         var first = session.DataSource;
         Assert.Same(first, session.DataSource);   // one data source object, not one per caller
         Assert.True(session.AutoInitialized);
+        Assert.Equal(1, session.OpenCount);       // the folder was opened exactly once
+    }
+
+    private static string CorruptFolder()
+    {
+        var dir = Directory.CreateTempSubdirectory("wzauto-corrupt-").FullName;
+        File.WriteAllText(Path.Combine(dir, "manifest.json"), "{ this is not json");
+        return dir;
+    }
+
+    [Fact]
+    public void FailingExplicitInit_KeepsThePreviousSourceUsable()
+    {
+        var corrupt = CorruptFolder();
+        try
+        {
+            var session = NewSession(_fixture.TestDataPath);
+            var tools = new FileTools(session);
+            MarkdownTestHelper.AssertSuccess(tools.ListCategories());
+            var before = session.DataSource;
+
+            MarkdownTestHelper.AssertFailure(tools.InitDataSource(corrupt));
+
+            Assert.Same(before, session.DataSource);
+            Assert.True(session.IsInitialized);
+            Assert.True(session.AutoInitialized);                 // the flags are unchanged too
+            Assert.Equal(1, session.OpenCount);
+            Assert.Contains("character", tools.ListCategories(), StringComparison.OrdinalIgnoreCase);
+        }
+        finally { try { Directory.Delete(corrupt, true); } catch { } }
+    }
+
+    [Fact]
+    public void FailingExplicitInit_DoesNotStopTheAutomaticOpen()
+    {
+        var corrupt = CorruptFolder();
+        try
+        {
+            var session = NewSession(_fixture.TestDataPath);
+            var tools = new FileTools(session);
+
+            MarkdownTestHelper.AssertFailure(tools.InitDataSource(corrupt));   // first call of the session fails
+
+            MarkdownTestHelper.AssertSuccess(tools.ListCategories());          // so the default folder still opens
+            Assert.True(session.AutoInitialized);
+        }
+        finally { try { Directory.Delete(corrupt, true); } catch { } }
+    }
+
+    [Fact]
+    public void FailedAutoOpen_IsLoggedToStandardError_AndStillReportsNoDataSource()
+    {
+        var corrupt = CorruptFolder();
+        var previous = Console.Error;
+        var captured = new StringWriter();
+        try
+        {
+            Console.SetError(captured);
+            var result = new FileTools(NewSession(corrupt)).ListCategories();
+            MarkdownTestHelper.AssertFailure(result);
+            Assert.Contains("No data source initialized", result);
+        }
+        finally
+        {
+            Console.SetError(previous);
+            try { Directory.Delete(corrupt, true); } catch { }
+        }
+        Assert.Contains("Automatic open", captured.ToString());
+        Assert.Contains("InvalidDataException", captured.ToString());
     }
 
     [Theory]

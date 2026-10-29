@@ -13,8 +13,8 @@ public static class SessionIdleSettings
     public const int MinSeconds = 10;
     public const int MaxSeconds = 604800;      // 7 days
 
-    /// <summary>Upper bound for the number of idle sessions the library keeps before it evicts the oldest ones.</summary>
-    public const int MaxIdleSessionCount = 100000;
+    /// <summary>Upper bound for the number of idle sessions the library keeps before it evicts the oldest ones (clients that reconnect without DELETE leave sessions behind for up to the idle timeout).</summary>
+    public const int MaxIdleSessionCount = 500;
 
     /// <summary>
     /// Reads the idle seconds from the raw environment value. Unset or blank gives the default silently; a value that

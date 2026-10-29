@@ -21,6 +21,7 @@ public class WzSessionManager : IDisposable
     private bool _explicitInit;
     private bool _autoInitialized;
     private bool _disposed;
+    private int _openCount;
 
     public WzSessionManager() { }
 
@@ -36,6 +37,9 @@ public class WzSessionManager : IDisposable
             return string.IsNullOrWhiteSpace(v) ? DefaultDataPathFallback : v.Trim();
         }
     }
+
+    /// <summary>How many data sources this session opened so far (automatic open and init_data_source).</summary>
+    public int OpenCount => Volatile.Read(ref _openCount);
 
     /// <summary>True when the current data source was opened by the automatic open, false after init_data_source.</summary>
     public bool AutoInitialized { get { lock (_initLock) return _autoInitialized; } }
@@ -80,8 +84,10 @@ public class WzSessionManager : IDisposable
                 _autoInitialized = true;
                 return _dataSource?.IsInitialized == true;
             }
-            catch
+            catch (Exception ex)
             {
+                // Still "not initialized" for the caller, but say why (corrupt manifest, I/O error, folder outside the allowed root).
+                Console.Error.WriteLine($"[WzSessionManager] Automatic open of the default data folder failed: {ex.GetType().Name}: {ex.Message}");
                 return false;
             }
         }
@@ -94,40 +100,51 @@ public class WzSessionManager : IDisposable
     {
         lock (_initLock)
         {
+            // Open first: when it throws, the previous data source stays in place and usable, and the flags are unchanged.
+            var info = OpenDataSource(basePath);
             _explicitInit = true;
             _autoInitialized = false;
-            return OpenDataSource(basePath);
+            return info;
         }
     }
 
     private DataSourceInfo OpenDataSource(string basePath)
     {
-        // Dispose existing data source if any
-        _dataSource?.Dispose();
-        _parsedImages.Clear();
-
         // Validate path exists
         if (!Directory.Exists(basePath))
         {
             throw new DirectoryNotFoundException($"Directory not found: {basePath}");
         }
 
-        // Create new data source
-        _dataSource = new ImgFileSystemDataSource(basePath);
-
-        var versionInfo = _dataSource.VersionInfo;
-        var categories = _dataSource.GetCategories().ToList();
-
-        return new DataSourceInfo
+        // Create the new data source first; the existing one is only replaced (and disposed) once this succeeded.
+        var next = new ImgFileSystemDataSource(basePath);
+        DataSourceInfo info;
+        try
         {
-            Path = basePath,
-            Name = _dataSource.Name,
-            Version = versionInfo?.Version ?? "unknown",
-            DisplayName = versionInfo?.DisplayName ?? basePath,
-            Categories = categories,
-            IsPreBB = versionInfo?.IsPreBB ?? false,
-            Is64Bit = versionInfo?.Is64Bit ?? false
-        };
+            var versionInfo = next.VersionInfo;
+            info = new DataSourceInfo
+            {
+                Path = basePath,
+                Name = next.Name,
+                Version = versionInfo?.Version ?? "unknown",
+                DisplayName = versionInfo?.DisplayName ?? basePath,
+                Categories = next.GetCategories().ToList(),
+                IsPreBB = versionInfo?.IsPreBB ?? false,
+                Is64Bit = versionInfo?.Is64Bit ?? false
+            };
+        }
+        catch
+        {
+            next.Dispose();
+            throw;
+        }
+
+        var previous = _dataSource;
+        _dataSource = next;
+        _parsedImages.Clear();
+        previous?.Dispose();
+        Interlocked.Increment(ref _openCount);
+        return info;
     }
 
     /// <summary>
