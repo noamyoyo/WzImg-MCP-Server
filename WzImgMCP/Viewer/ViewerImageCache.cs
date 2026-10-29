@@ -24,6 +24,9 @@ public sealed class LoadedImage
     public long ParseMillis { get; }
     public long FileBytes { get; }
 
+    /// <summary>SHA-256 (lower-case hex) of the bytes that were parsed.</summary>
+    public string Sha256 { get; }
+
     /// <summary>Estimated memory held (bytes of the file kept for lazy canvases plus the parsed tree).</summary>
     public long Cost { get; }
 
@@ -36,8 +39,9 @@ public sealed class LoadedImage
     /// <summary>True once the last reference is gone and the image has been disposed.</summary>
     public bool Disposed => Volatile.Read(ref _references) <= 0;
 
-    public LoadedImage(ImageKey key, WzImage image, string keyUsed, long parseMillis, long fileBytes, long cost)
+    public LoadedImage(ImageKey key, WzImage image, string keyUsed, long parseMillis, long fileBytes, long cost, string sha256 = "")
     {
+        Sha256 = sha256;
         Key = key;
         Image = image;
         KeyUsed = keyUsed;

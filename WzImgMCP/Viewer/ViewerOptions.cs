@@ -44,6 +44,21 @@ public sealed class ViewerOptions
     public const int DefaultCacheMb = 256;
     public const string LinkBudgetMbEnvVar = "WZ_VIEWER_LINK_BUDGET_MB";
     public const int DefaultLinkBudgetMb = 64;
+    public const string MaxChangesEnvVar = "WZ_VIEWER_MAX_CHANGES";
+    public const string MaxCanvasDecodesEnvVar = "WZ_VIEWER_MAX_CANVAS_DECODES";
+    public const string DiffBudgetSecondsEnvVar = "WZ_VIEWER_DIFF_BUDGET_SECONDS";
+    public const int DefaultMaxChanges = 2000;
+    public const int DefaultMaxCanvasDecodes = 200;
+    public const int DefaultDiffBudgetSeconds = 25;
+
+    /// <summary>Most changes a diff lists; more set <c>truncated</c>.</summary>
+    public int MaxChanges { get; init; } = DefaultMaxChanges;
+
+    /// <summary>Most canvas pairs one diff decodes to pixels; further differing pairs are reported as <c>pixels_unverified</c>.</summary>
+    public int MaxCanvasDecodes { get; init; } = DefaultMaxCanvasDecodes;
+
+    /// <summary>Wall-clock time a diff may spend comparing before it stops and returns what it has, flagged as truncated.</summary>
+    public TimeSpan DiffBudget { get; init; } = TimeSpan.FromSeconds(DefaultDiffBudgetSeconds);
 
     /// <summary>Largest .img file the viewer reads; a bigger one gets 413 <c>too_large</c>.</summary>
     public long MaxFileBytes { get; init; } = DefaultMaxFileMb * 1024L * 1024L;
@@ -100,6 +115,9 @@ public sealed class ViewerOptions
             MaxDecodes = (int)ParseWhole(getEnv(MaxDecodesEnvVar), DefaultMaxDecodes, 1, 16),
             CacheBytes = ParseWhole(getEnv(CacheMbEnvVar), DefaultCacheMb, 0, 16384) * 1024L * 1024L,
             LinkBudgetBytes = ParseWhole(getEnv(LinkBudgetMbEnvVar), DefaultLinkBudgetMb, 0, 1024) * 1024L * 1024L,
+            MaxChanges = (int)ParseWhole(getEnv(MaxChangesEnvVar), DefaultMaxChanges, 1, 100000),
+            MaxCanvasDecodes = (int)ParseWhole(getEnv(MaxCanvasDecodesEnvVar), DefaultMaxCanvasDecodes, 0, 100000),
+            DiffBudget = TimeSpan.FromSeconds(ParseWhole(getEnv(DiffBudgetSecondsEnvVar), DefaultDiffBudgetSeconds, 1, 600)),
         };
     }
 

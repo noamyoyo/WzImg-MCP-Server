@@ -88,6 +88,8 @@ public static class ViewerHost
         builder.Services.AddSingleton(new ViewerImageCache(options.CacheBytes));
         builder.Services.AddSingleton(sp => new ViewerImageLoader(options, sp.GetRequiredService<IViewerFileSystem>(), sp.GetRequiredService<ViewerImageCache>()));
         builder.Services.AddSingleton(new ViewerDecodeLimiter(options.MaxDecodes));
+        builder.Services.AddSingleton(sp => new Diff.ViewerBaseMap(options, sp.GetRequiredService<IViewerFileSystem>()));
+        builder.Services.AddSingleton<Diff.ViewerDiffService>();
         builder.Services.AddSingleton(sp => new ViewerWorkRunner(sp.GetRequiredService<ViewerDecodeLimiter>(), sp.GetRequiredService<ViewerPathResolver>(),
             sp.GetRequiredService<ViewerImageLoader>(), options.LinkBudgetBytes));
         builder.Services.AddSingleton(new ViewerRequestLimiter(options.MaxConcurrentRequests));
@@ -213,6 +215,27 @@ public static class ViewerHost
             var result = await runner.RunAsync(image.Source, slot, ct, links => ViewerInspector.Inspect(loader, image, links, ct));
             return Results.Json(result, Json);
         }).AddEndpointFilter(TypedErrors);
+
+        app.MapGet("/v1/diff", async (HttpContext context, ViewerPathResolver resolver, Diff.ViewerDiffService diff, ViewerWorkRunner runner) =>
+        {
+            var person = Single(context.Request.Query["person"]);
+            if (person is not ("owner" or "friend"))
+                throw new ViewerApiException(400, "unknown_source", "person must be owner or friend");
+            var path = Single(context.Request.Query["path"]);
+            var ct = context.RequestAborted;
+            var canon = await ResolveOrNull(resolver, "canon", path, ct);
+            var mine = await ResolveOrNull(resolver, person, path, ct);
+            var slot = context.Items[RequestSlotKey] as ViewerRequestSlot;
+            var result = await runner.RunAsync(person, slot, ct, _ => diff.Diff(person, canon, mine, ct));
+            return Results.Json(result, Json);
+        }).AddEndpointFilter(TypedErrors);
+    }
+
+    /// <summary>Resolves a path in one source; a missing file is null, any other problem is thrown.</summary>
+    private static async Task<ResolvedImage?> ResolveOrNull(ViewerPathResolver resolver, string source, string? path, CancellationToken cancellationToken)
+    {
+        try { return await resolver.ResolveAsync(source, path, cancellationToken); }
+        catch (ViewerApiException ex) when (ex.Code == "not_found") { return null; }
     }
 
     /// <summary>Turns a <see cref="ViewerApiException"/> from a handler into its typed JSON answer.</summary>

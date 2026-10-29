@@ -211,9 +211,10 @@ public sealed class ViewerImageLoader
             return hit;
 
         cancellationToken.ThrowIfCancellationRequested();
+        var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(read.Bytes)).ToLowerInvariant();
         var (image, keyUsed, millis) = Parse(resolved, read.Bytes, preferred, cancellationToken);
         var cost = ViewerImageSizeEstimator.Estimate(image, read.Bytes.Length);
-        return _cache.Add(new LoadedImage(key, image, keyUsed.ToString(), millis, read.Bytes.Length, cost));
+        return _cache.Add(new LoadedImage(key, image, keyUsed.ToString(), millis, read.Bytes.Length, cost, sha));
     }
 
     /// <summary>Reads the file; if it changed while being read, once more; still changing gives 409 <c>file_busy</c>.</summary>
