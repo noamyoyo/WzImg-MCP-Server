@@ -313,6 +313,27 @@ public sealed class ViewerLoaderTests : IDisposable
         return (fd, fd < 0 ? System.Runtime.InteropServices.Marshal.GetLastPInvokeError() : 0);
     }
 
+    [Fact]
+    public void EnvRequire_FailsWhenTheCapabilityIsMissing_AndSkipsOnlyWithTheVariable()
+    {
+        var previous = Environment.GetEnvironmentVariable(EnvRequire.AllowSkipVariable);
+        try
+        {
+            EnvRequire.Capability(true, "available");   // nothing happens
+
+            Environment.SetEnvironmentVariable(EnvRequire.AllowSkipVariable, null);
+            Assert.ThrowsAny<Exception>(() => EnvRequire.Capability(false, "symbolic links cannot be created here"));
+            Assert.Throws<Xunit.Sdk.FailException>(() => EnvRequire.Capability(false, "mkfifo is not available"));
+
+            Environment.SetEnvironmentVariable(EnvRequire.AllowSkipVariable, "0");
+            Assert.Throws<Xunit.Sdk.FailException>(() => EnvRequire.Capability(false, "x"));
+
+            Environment.SetEnvironmentVariable(EnvRequire.AllowSkipVariable, "1");
+            Assert.Throws<Xunit.SkipException>(() => EnvRequire.Capability(false, "symbolic links cannot be created here"));
+        }
+        finally { Environment.SetEnvironmentVariable(EnvRequire.AllowSkipVariable, previous); }
+    }
+
     // ---- the safe open
 
     [SkippableFact]

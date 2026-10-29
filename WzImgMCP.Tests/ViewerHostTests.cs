@@ -456,7 +456,7 @@ public sealed class ViewerHostTests : IAsyncLifetime
             .Select(e => ((RouteEndpoint)e).RoutePattern.RawText)
             .OrderBy(r => r, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "/v1/diff", "/v1/health", "/v1/inspect", "/v1/resolve" }, routes);
+        Assert.Equal(new[] { "/v1/canvas", "/v1/diff", "/v1/frames", "/v1/health", "/v1/inspect", "/v1/resolve" }, routes);
     }
 
     [Fact]
