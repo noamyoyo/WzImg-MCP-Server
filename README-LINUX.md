@@ -181,6 +181,22 @@ one of them just to read their names. Measured on the live editors: 47 s (MCP cl
 answer, and the memory of the editor went from 29 MB to 1.77 GiB. `search_by_name`, `search_by_value`, `get_category_summary` and the
 other tools that went through `GetImagesInCategory` had the same flaw. Now:
 
+**Breaking changes (changed defaults and arguments).** A client written against the earlier tools must change:
+
+| Tool | Before | Now |
+| --- | --- | --- |
+| `search_by_name`, `search_by_value`, `find_broken_uols` | no `category` and no `image`: searched every category | **`category` or `image` is required** (`category_required`). A category with more than `WZIMG_SCAN_MAX_IMAGES` (150) images is refused with `scope_too_wide` unless `image` is given. |
+| `batch_search` | `categories="all"` was the default and worked | the categories together must hold at most 150 images, so **`categories="all"` fails on a big data set** (`scope_too_wide`); give `categories="Mob,Npc"`. |
+| `list_images_in_category` | every image, `full_path` = `category/file name` | **200 per page** (`limit` up to 1000, `offset`); `full_path` is the real path of nested images; the answer has `total`, `returned`, `has_more`, `next_offset`. |
+| `get_category_summary` | counted properties, canvases and sounds of the first 100 images | counts nothing unless **`detailed=true`**; the default answer is file sizes and counts of one page of 200 images; `total_property_count` and the other totals exist only with `detailed=true`. |
+| `get_parsed_images` | loaded every image to list the parsed ones | lists the images that are in the cache and parsed. |
+| `unload_category` | loaded every image of the category to unload it | works on cached images only. |
+| `preload_category`, `batch_export_images` | no limit | refused above `WZIMG_BULK_MAX_IMAGES` (2000) images unless `force=true`; `preload_category` stops when the cache is full. |
+| cache | `Cache.MaxMemoryCacheMB` 512, estimate 2x to 5x too low | `WZIMG_CACHE_MB` 400 against a calibrated estimate, so the same number of megabytes keeps fewer images (item 32). |
+
+Every refusal names the argument to add and the number of images the category has, so a client can act on it without reading this file:
+for example `scope_too_wide: category 'Map' has 5622 images, more than the limit of 150 (WZIMG_SCAN_MAX_IMAGES); nothing was opened. To continue, call search_by_name again with the argument image='<path>' (keep category='Map'), for example image='Map1/000010000.img', to look at one image; list_images_in_category(category='Map', limit=200, offset=0) lists the image paths, 200 per page (next_offset gives the next page). Or search a category with at most 150 images.`
+
 | Tool | Behaviour |
 | --- | --- |
 | `list_images_in_category` | Names only, nothing is opened or parsed. Sorted by ordinal name. `limit` (default 200, maximum 1000) and `offset` (default 0); the answer has `total`, `returned`, `offset`, `limit`, `has_more` (printed only when true, like every flag in the text results) and `next_offset` (absent on the last page). `full_path` is now the real path inside the category (`Map/Obj/x.img`), where it used to be `category/file name`. The same paging applies to `subdirectory`. |
@@ -209,6 +225,14 @@ of the session and two ticks never overlap. Each trim logs one line with counts 
 is cut by a trim just reloads the image from disk the next time; the one residual is an edit that is made in the instants between
 an image being fetched from the cache and its `Changed` flag being set while a soft limit trim runs (the same window an ordinary
 cache eviction has always had).
+
+**Edits and the memory guard.** An image a tool is about to change is protected before the tool changes anything: `BeginEdit`
+takes the lock of that image, parses it, flags it as changed (the flag is what the cache honours: eviction, `clear_cache` and the
+memory guard's trim never drop a changed image) and looks the image up in the cache again. If a trim, an eviction or
+`unload_category` took the instance out of the cache between the fetch and the flag, the lookup returns another instance and the edit
+starts over on that one, so an edit is never made on an object nobody can reach. The same lock is taken by `save_image`,
+`discard_changes`, `unparse_image`, `unload_category` and by a scan while it looks at a cached image, and a scan never unparses or
+disposes a cached image (it disposes only the copies it loaded itself; a cached image that was unparsed stays parsed after the scan).
 
 **The size estimate.** The cache evicts when the sum of `ImgFileSystemManager.EstimateWzImageSize` passes the limit. That estimate
 used 100 bytes per property, so the cache limit was far below the real managed memory (the "512 MB" cache of the owner's editors held
@@ -420,7 +444,7 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     images; `find_broken_uols` and `batch_search` are limited the same way (`batch_search` with its default `all` therefore fails on a
     big data set); scan results name an image by its path in the category; `get_category_summary` no longer counts properties unless
     `detailed=true` and lists one page; `get_parsed_images` lists only cached images; `unload_category` leaves images that are not
-    cached alone and drops the others from the cache. `Result<T>` and the result types of the changed tools have an `error_code`.
+    cached alone and drops the others from the cache (an image that was edited after the call began is skipped, `skipped_edited_count`). `Result<T>` and the result types of the changed tools have an `error_code`.
 
 Path audit of the tools: the only tool code that joins a user supplied string into a path with `Path.Combine` is in `BatchTools`
 (`batch_export_images` category: checked as a plain name; image directory and canvas file names: sanitised, unique, and written through

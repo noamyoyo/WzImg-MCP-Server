@@ -163,10 +163,10 @@ public class AnalysisTools
         }
     }
 
-    [McpServerTool(Name = "find_broken_uols"), Description("Find UOL references that don't resolve to valid targets in one image, or in all images of a category of at most WZIMG_SCAN_MAX_IMAGES (default 150) images")]
+    [McpServerTool(Name = "find_broken_uols"), Description("Find UOL references that don't resolve to valid targets. Give image (the path of one image inside its category) to check one image, or category to check every image of it (only when it has at most WZIMG_SCAN_MAX_IMAGES, default 150, images). One of the two is required.")]
     public string FindBrokenUols(
-        [Description("Category to search (required unless an image is given)")] string? category = null,
-        [Description("Specific image to search (optional)")] string? image = null,
+        [Description("Category to check; every image of it is opened, so it may have at most 150 images (required unless image is given)")] string? category = null,
+        [Description("Path of one image inside the category, as list_images_in_category shows it; checks only that image, whatever the size of the category")] string? image = null,
         [Description("Maximum results to return (default: 30)")] int maxResults = 30)
     {
         if (!_session.IsInitialized)
@@ -178,8 +178,7 @@ public class AnalysisTools
         {
             var brokenUols = new List<BrokenUol>();
 
-            var plan = ScanGuard.PlanSearch(_session, category, image,
-                "Narrow it with the image parameter (list_images_in_category pages through the image names of a category), or check a smaller category.");
+            var plan = ScanGuard.PlanSearch(_session, category, image, "find_broken_uols");
             var scan = ScanGuard.Run(_session, plan, (img, cat, name) =>
             {
                 FindBrokenUolsRecursive(img, cat, name, "", brokenUols, maxResults);

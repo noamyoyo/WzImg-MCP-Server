@@ -137,6 +137,12 @@ public sealed class ScanGuardTests : IDisposable
 
         MarkdownTestHelper.AssertFailure(result);
         Assert.Equal("category_required", Value(result, "error_code"));
+        var message = Value(result, "error");
+        Assert.Contains("search_by_name needs the argument 'category' or the argument 'image'", message);
+        Assert.Contains("category='<name>'", message);
+        Assert.Contains("image='<path of the image inside its category>'", message);
+        Assert.Contains("mob (30)", message);                                   // the categories with their image counts
+        Assert.Contains("at most 100 images", message);                         // the limit of this session
         AssertNothingOpened();
     }
 
@@ -155,9 +161,14 @@ public sealed class ScanGuardTests : IDisposable
             Assert.Contains("30 images", message);
             Assert.Contains("limit of 10", message);
             Assert.Contains("WZIMG_SCAN_MAX_IMAGES", message);
-            Assert.Contains("image parameter", message);
-            Assert.Contains("list_images_in_category", message);
+            // An AI client must be able to act on it: which argument to add, with a real example, and where to find more.
+            Assert.Contains("category 'Mob' has 30 images", message);
+            Assert.Contains("the argument image='<path>' (keep category='Mob')", message);
+            Assert.Contains($"image='{_tree.RelativePaths[0]}'", message);   // a real image of the category as the example
+            Assert.Contains("list_images_in_category(category='Mob', limit=200, offset=0)", message);
         }
+        Assert.Contains("search_by_name", Value(tools.SearchByName("needle*", ScanTestTree.Category), "error"));
+        Assert.Contains("search_by_value", Value(tools.SearchByValue("needle", category: ScanTestTree.Category), "error"));
         AssertNothingOpened();
     }
 

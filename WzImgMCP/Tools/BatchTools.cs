@@ -230,7 +230,7 @@ public class BatchTools
             // The images are read one after the other and not kept (see ScanGuard.Run), but a call that goes through
             // thousands of them is asked for twice.
             ScanGuard.RequireWithinBulkCap(_session, categoryList, force,
-                "Export fewer categories, lower maxImages is not enough because every image is read, or pass force=true to export anyway.");
+                "To continue, call batch_export_images again with the argument force=true to export anyway, or with the argument categories='<fewer names>' (maxImages does not help: every image is opened to find its canvases).");
 
             if (!Directory.Exists(outputDir))
             {
@@ -298,7 +298,7 @@ public class BatchTools
         }
     }
 
-    [McpServerTool(Name = "batch_search"), Description("Search across multiple categories; the categories together may hold at most WZIMG_SCAN_MAX_IMAGES (default 150) images, otherwise the call is refused (scope_too_wide). Stops early when the time budget (WZIMG_SCAN_BUDGET_SECONDS) ends.")]
+    [McpServerTool(Name = "batch_search"), Description("Search across multiple categories. Every image of every listed category is opened, so the categories together may hold at most WZIMG_SCAN_MAX_IMAGES (default 150) images, otherwise the call is refused with scope_too_wide; the default categories='all' therefore only works on a small data set, give categories='<comma separated names>' instead. Stops early with truncated=true when the time budget (WZIMG_SCAN_BUDGET_SECONDS) ends.")]
     public string BatchSearch(
         [Description("Search pattern (supports wildcards)")] string pattern,
         [Description("Categories to search (comma-separated, or 'all')")] string categories = "all",
@@ -328,7 +328,8 @@ public class BatchTools
             var regex = WildcardToRegex(pattern);
 
             var plan = ScanGuard.PlanScan(_session, categoryList.ToList(),
-                "Search one category at a time, or one image with search_by_name / search_by_value; list_images_in_category pages through the image names of a category.");
+                $"To continue, call batch_search again with the argument categories='<comma separated names>' naming only categories whose images add up to at most {_session.ScanLimits.MaxImages} (for example categories='Mob'); the default categories='all' is not accepted on a data set this big. " +
+                "To search one image use search_by_name or search_by_value with the arguments category and image; list_images_in_category(category='<name>') shows how many images a category has.");
             var scan = ScanGuard.Run(_session, plan, (img, category, name) =>
             {
                 try

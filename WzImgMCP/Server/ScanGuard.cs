@@ -67,7 +67,7 @@ public static class ScanGuard
     /// The plan of a search: with <paramref name="image"/> that image (in <paramref name="category"/>, or in every category
     /// that has it), otherwise every image of <paramref name="category"/>, which is then required and limited.
     /// </summary>
-    public static ScanPlan PlanSearch(WzSessionManager session, string? category, string? image, string alternative)
+    public static ScanPlan PlanSearch(WzSessionManager session, string? category, string? image, string tool)
     {
         var source = session.ImgSource;
         if (!string.IsNullOrEmpty(image))
@@ -79,12 +79,39 @@ public static class ScanGuard
             };
         }
 
+        int max = session.ScanLimits.MaxImages;
         if (string.IsNullOrEmpty(category))
             throw new ToolErrorException(CategoryRequired,
-                "give a category, or an image: a search without an image opens every image of the category. " +
-                "list_images_in_category lists the images of a category, one page at a time.");
+                $"{tool} needs the argument 'category' or the argument 'image'. " +
+                $"Add category='<name>' to look through every image of one category (allowed when the category has at most {max} images), " +
+                $"or add image='<path of the image inside its category>' (with or without category) to look at one image. " +
+                $"{DescribeCategories(source, max)} " +
+                "list_images_in_category(category='<name>') lists the image paths of a category, one page at a time.");
 
-        return PlanScan(session, new[] { category }, alternative);
+        var plan = PlanCategories(session, new[] { category }, max, ServerSettingsNames.ScanMax, SearchAdvice(source, category, tool, max));
+        return plan;
+    }
+
+    private static string SearchAdvice(MapleLib.Img.ImgFileSystemDataSource source, string category, string tool, int max)
+    {
+        var paths = source.GetImagePathsInCategory(category);
+        string example = paths.Count > 0 ? paths[0].Replace('\\', '/') : "<path>";
+        return $"To continue, call {tool} again with the argument image='<path>' (keep category='{category}'), for example image='{example}', " +
+               $"to look at one image; list_images_in_category(category='{category}', limit=200, offset=0) lists the image paths, 200 per page " +
+               $"(next_offset gives the next page). Or search a category with at most {max} images.";
+    }
+
+    /// <summary>The categories with their image counts, split into those a whole-category scan accepts and those it refuses.</summary>
+    private static string DescribeCategories(MapleLib.Img.ImgFileSystemDataSource source, int max)
+    {
+        var counts = source.GetCategories().Select(c => (Name: c, Count: source.GetImagePathsInCategory(c).Count)).ToList();
+        string Format(IEnumerable<(string Name, int Count)> list)
+        {
+            var items = list.OrderBy(c => c.Name, StringComparer.Ordinal).ToList();
+            return items.Count == 0 ? "none" : string.Join(", ", items.Take(12).Select(c => $"{c.Name} ({c.Count})")) + (items.Count > 12 ? ", ..." : "");
+        }
+        return $"Categories with at most {max} images (can be given whole): {Format(counts.Where(c => c.Count <= max))}. " +
+               $"Larger (give an image, or use list_images_in_category): {Format(counts.Where(c => c.Count > max))}.";
     }
 
     /// <summary>The plan of a scan of whole categories, limited to WZIMG_SCAN_MAX_IMAGES images in total.</summary>

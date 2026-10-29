@@ -137,7 +137,7 @@ public class LifecycleTools
             var ds = _session.DataSource;
             var source = _session.ImgSource;
             ScanGuard.RequireWithinBulkCap(_session, new[] { category }, force,
-                "Pass force=true to preload anyway: the cache keeps only what fits in WZIMG_CACHE_MB, so the call stops when it is full.");
+                "To continue, call preload_category again with the argument force=true to preload anyway (the cache holds only what fits in WZIMG_CACHE_MB, so the call stops when it is full). Preloading is never required: every tool loads an image when it needs it.");
 
             var paths = ds.GetImagePathsInCategory(category);
             int before = CountCachedParsed(source, category);

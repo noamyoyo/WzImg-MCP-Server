@@ -109,14 +109,11 @@ public class NavigationTools : ToolBase
         });
     }
 
-    private const string ScanAlternative =
-        "Narrow it with the image parameter (list_images_in_category pages through the image names of a category), or search a smaller category.";
-
-    [McpServerTool(Name = "search_by_name"), Description("Search for properties by name pattern in one image, or in all images of a category of at most WZIMG_SCAN_MAX_IMAGES (default 150) images. Use compact=true for smaller responses.")]
+    [McpServerTool(Name = "search_by_name"), Description("Search for properties by name pattern. Give image (the path of one image inside its category) to search one image, or category to search every image of that category (only when it has at most WZIMG_SCAN_MAX_IMAGES, default 150, images; list_images_in_category tells how many a category has). One of the two is required. Use compact=true for smaller responses.")]
     public string SearchByName(
         [Description("Search pattern (case-insensitive, supports * wildcards)")] string pattern,
-        [Description("Category to search in (required unless an image is given)")] string? category = null,
-        [Description("Specific image to search in (optional)")] string? image = null,
+        [Description("Category to search in; every image of it is searched, so it may have at most 150 images (required unless image is given)")] string? category = null,
+        [Description("Path of one image inside the category, as list_images_in_category shows it (e.g. 'Map1/000010000.img'); searches only that image, whatever the size of the category")] string? image = null,
         [Description("Maximum results to return (default: 20, max: 200)")] int maxResults = 20,
         [Description("Return compact format with paths only (default: true)")] bool compact = true)
     {
@@ -128,7 +125,7 @@ public class NavigationTools : ToolBase
             var results = new List<SearchMatch>();
             var regex = WildcardToRegex(pattern);
 
-            var plan = ScanGuard.PlanSearch(Session, category, image, ScanAlternative);
+            var plan = ScanGuard.PlanSearch(Session, category, image, "search_by_name");
             var scan = ScanGuard.Run(Session, plan, (img, cat, name) =>
             {
                 SearchInObject(img, cat, name, "", regex, results, maxResults, compact);
@@ -139,12 +136,12 @@ public class NavigationTools : ToolBase
         });
     }
 
-    [McpServerTool(Name = "search_by_value"), Description("Search for properties by value in one image, or in all images of a category of at most WZIMG_SCAN_MAX_IMAGES (default 150) images. Use compact=true for smaller responses.")]
+    [McpServerTool(Name = "search_by_value"), Description("Search for properties by value. Give image (the path of one image inside its category) to search one image, or category to search every image of that category (only when it has at most WZIMG_SCAN_MAX_IMAGES, default 150, images; list_images_in_category tells how many a category has). One of the two is required. Use compact=true for smaller responses.")]
     public string SearchByValue(
         [Description("Value to search for (string representation)")] string value,
         [Description("Property type to filter (optional: String, Int, Float, etc.)")] string? type = null,
-        [Description("Category to search in (required unless an image is given)")] string? category = null,
-        [Description("Specific image to search in (optional)")] string? image = null,
+        [Description("Category to search in; every image of it is searched, so it may have at most 150 images (required unless image is given)")] string? category = null,
+        [Description("Path of one image inside the category, as list_images_in_category shows it (e.g. 'Map1/000010000.img'); searches only that image, whatever the size of the category")] string? image = null,
         [Description("Maximum results to return (default: 20, max: 200)")] int maxResults = 20,
         [Description("Return compact format with paths only (default: true)")] bool compact = true)
     {
@@ -155,7 +152,7 @@ public class NavigationTools : ToolBase
 
             var results = new List<SearchMatch>();
 
-            var plan = ScanGuard.PlanSearch(Session, category, image, ScanAlternative);
+            var plan = ScanGuard.PlanSearch(Session, category, image, "search_by_value");
             var scan = ScanGuard.Run(Session, plan, (img, cat, name) =>
             {
                 SearchByValueInObject(img, cat, name, "", value, type, results, maxResults, compact);
