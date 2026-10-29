@@ -87,6 +87,9 @@ public static class ViewerHost
         builder.Services.AddSingleton(resolver ?? new ViewerPathResolver(options.Roots, files));
         builder.Services.AddSingleton(new ViewerImageCache(options.CacheBytes));
         builder.Services.AddSingleton(sp => new ViewerImageLoader(options, sp.GetRequiredService<IViewerFileSystem>(), sp.GetRequiredService<ViewerImageCache>()));
+#if LINUX_BUILD
+        builder.Services.AddSingleton(sp => new Canvas.ViewerCanvasService(sp.GetRequiredService<ViewerImageLoader>()));
+#endif
         builder.Services.AddSingleton(new ViewerDecodeLimiter(options.MaxDecodes));
         builder.Services.AddSingleton(sp => new Diff.ViewerBaseMap(options, sp.GetRequiredService<IViewerFileSystem>()));
         builder.Services.AddSingleton<Diff.ViewerDiffService>();
@@ -229,7 +232,75 @@ public static class ViewerHost
             var result = await runner.RunAsync(person, slot, ct, _ => diff.Diff(person, canon, mine, ct));
             return Results.Json(result, Json);
         }).AddEndpointFilter(TypedErrors);
+
+#if LINUX_BUILD
+        MapCanvasRoutes(app);
+#endif
     }
+
+#if LINUX_BUILD
+    /// <summary>
+    /// <c>/v1/canvas</c> (one canvas as PNG) and <c>/v1/frames</c> (the frames of an animation, as JSON). Both resolve the
+    /// path with the same rules as <c>/v1/diff</c>, and run their parse and pixel work through the work runner.
+    /// </summary>
+    private static void MapCanvasRoutes(WebApplication app)
+    {
+        app.MapGet("/v1/canvas", async (HttpContext context, ViewerPathResolver resolver, IViewerFileSystem files, Canvas.ViewerCanvasService canvases, ViewerWorkRunner runner) =>
+        {
+            var query = context.Request.Query;
+            var ct = context.RequestAborted;
+            var image = await resolver.ResolveAsync(Single(query["source"]), Single(query["path"]), ct);
+            var nodeText = Single(query["node"]);
+            var node = Canvas.ViewerCanvasService.ParseNode(nodeText);
+            if (query["maxSide"].Count > 1)
+                throw new ViewerApiException(400, "bad_request", "maxSide must be given once");
+            int maxSide = Canvas.ViewerCanvasService.ParseMaxSide(Single(query["maxSide"]), out var maxSideText);
+
+            // Revalidation: the ETag depends on the file stamp, the node, maxSide and the renderer, so a match needs no parse and no decode.
+            var stamp = files.Stat(image.FullPath) ?? throw new ViewerApiException(404, "not_found", "image not found");
+            var etag = Canvas.ViewerCanvasService.ETagFor(image.Source, image.RelativePath, stamp, nodeText!, maxSideText);
+            if (Canvas.ViewerCanvasService.IfNoneMatches(context.Request.Headers.IfNoneMatch.ToString(), etag))
+            {
+                context.Response.Headers.ETag = etag;
+                context.Response.Headers.CacheControl = "private, no-cache";
+                return Results.StatusCode(StatusCodes.Status304NotModified);
+            }
+
+            var slot = context.Items[RequestSlotKey] as ViewerRequestSlot;
+            var render = await runner.RunAsync(image.Source, slot, ct, links => canvases.Render(image, node, nodeText!, maxSide, maxSideText, links, ct));
+
+            var headers = context.Response.Headers;
+            if (render.ETag != null)
+            {
+                headers.ETag = render.ETag;
+                headers.CacheControl = "private, no-cache";   // keep it, but revalidate every time
+            }
+            else
+                headers.CacheControl = "private, no-store";   // the pixels come from another image: the file stamp cannot validate them
+            headers["X-Canvas-Width"] = render.Width.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            headers["X-Canvas-Height"] = render.Height.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            headers["X-Canvas-Origin-X"] = render.OriginX.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            headers["X-Canvas-Origin-Y"] = render.OriginY.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (render.DelayMs.HasValue)
+                headers["X-Canvas-Delay"] = render.DelayMs.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            headers["X-Image-Width"] = render.OutputWidth.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            headers["X-Image-Height"] = render.OutputHeight.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return Results.Bytes(render.Png, "image/png");
+        }).AddEndpointFilter(TypedErrors);
+
+        app.MapGet("/v1/frames", async (HttpContext context, ViewerPathResolver resolver, Canvas.ViewerCanvasService canvases, ViewerWorkRunner runner) =>
+        {
+            var query = context.Request.Query;
+            var ct = context.RequestAborted;
+            var image = await resolver.ResolveAsync(Single(query["source"]), Single(query["path"]), ct);
+            var nodeText = Single(query["node"]);
+            var node = Canvas.ViewerCanvasService.ParseNode(nodeText);
+            var slot = context.Items[RequestSlotKey] as ViewerRequestSlot;
+            var result = await runner.RunAsync(image.Source, slot, ct, links => canvases.Frames(image, node, nodeText!, links, ct));
+            return Results.Json(result, Json);
+        }).AddEndpointFilter(TypedErrors);
+    }
+#endif
 
     /// <summary>Resolves a path in one source; a missing file is null, any other problem is thrown.</summary>
     private static async Task<ResolvedImage?> ResolveOrNull(ViewerPathResolver resolver, string source, string? path, CancellationToken cancellationToken)

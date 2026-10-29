@@ -451,6 +451,17 @@ public static class CanvasImaging
         return data.ToArray();
     }
 
+    /// <summary>PNG bytes of straight-alpha BGRA32 pixels (the viewer's picture endpoint).</summary>
+    public static byte[] EncodeBgraToPng(byte[] bgra, int width, int height) => SkiaEncode(bgra, width, height, ExportImageFormat.Png);
+
+    /// <summary>PNG bytes of straight-alpha BGRA32 pixels scaled to <paramref name="newWidth"/> x <paramref name="newHeight"/>.</summary>
+    public static byte[] ScaleBgraToPng(byte[] bgra, int width, int height, int newWidth, int newHeight)
+    {
+        if ((long)width * height * 4 != bgra.Length)
+            throw new ArgumentException("The pixel buffer does not match the dimensions.");
+        return SkiaScaleToPng(bgra, width, height, newWidth, newHeight);
+    }
+
     private static byte[] SkiaDecodePng(byte[] png, int declaredWidth, int declaredHeight, out int width, out int height)
     {
         using var data = SKData.CreateCopy(png);

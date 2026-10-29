@@ -96,6 +96,18 @@ public sealed class ViewerLinkContext : IDisposable
         return lease?.Image;
     }
 
+    /// <summary>
+    /// The image this request opened for a link whose parsed tree is <paramref name="image"/>, or null. A property found
+    /// through a link may only be read when its owner is one of these: that is how its lock and its lifetime are known.
+    /// </summary>
+    public LoadedImage? LoadedFor(WzImage image)
+    {
+        foreach (var lease in _leases.Values)
+            if (lease != null && ReferenceEquals(lease.Image, image))
+                return lease.Loaded;
+        return null;
+    }
+
     public void Dispose()
     {
         foreach (var lease in _leases.Values)
