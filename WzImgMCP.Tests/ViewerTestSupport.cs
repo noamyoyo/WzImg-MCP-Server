@@ -10,6 +10,25 @@ using WzImgMCP.Viewer;
 
 namespace WzImgMCP.Tests;
 
+/// <summary>
+/// For tests that need a FIFO or a symbolic link. When the environment cannot create one the test FAILS: a silent skip
+/// would let the security guarantee go untested in CI. Set <c>WZ_TEST_ALLOW_SKIP=1</c> to skip instead (a developer
+/// machine without symlinks).
+/// </summary>
+internal static class EnvRequire
+{
+    public const string AllowSkipVariable = "WZ_TEST_ALLOW_SKIP";
+
+    public static bool SkipAllowed => Environment.GetEnvironmentVariable(AllowSkipVariable) == "1";
+
+    public static void Capability(bool available, string reason)
+    {
+        if (available) return;
+        if (SkipAllowed) throw new Xunit.SkipException(reason);
+        Assert.Fail($"{reason}. This test must run (it checks a security guarantee); set {AllowSkipVariable}=1 to allow skipping it.");
+    }
+}
+
 /// <summary>Builds small .img files with the library's own writer.</summary>
 internal static class ImgFixture
 {

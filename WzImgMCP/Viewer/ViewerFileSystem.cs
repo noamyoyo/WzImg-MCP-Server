@@ -2,8 +2,12 @@ using System.Runtime.InteropServices;
 
 namespace WzImgMCP.Viewer;
 
-/// <summary>Size and modification time of a file; two equal stamps mean "the same content" for the viewer.</summary>
-public readonly record struct FileStamp(long Size, long MtimeTicks);
+/// <summary>
+/// Size, modification time, status-change time and inode of a file; two equal stamps mean "the same content" for the
+/// viewer. mtime can be set to any value by the file's owner (<c>touch -r</c>, rsync -t); ctime cannot be set from user
+/// space (any rewrite or metadata change moves it), and a replaced file has another inode.
+/// </summary>
+public readonly record struct FileStamp(long Size, long MtimeTicks, long CtimeTicks = 0, ulong Inode = 0);
 
 /// <summary>Device and inode: which file it really is, whatever path was used to reach it.</summary>
 public readonly record struct FileIdentity(ulong Device, ulong Inode);
@@ -23,7 +27,9 @@ public interface IViewerFileSystem
     FileStamp? Stat(string path);
 
     /// <summary>
-    /// Reads the whole file safely. Throws a <see cref="ViewerApiException"/>: <c>not_found</c> (404) when it cannot be opened,
+    /// Reads the whole file safely. Throws a <see cref="ViewerApiException"/>: <c>not_found</c> (404) when the file is not there,
+    /// <c>busy</c> (503) when the open failed for a transient reason (an interrupted call that kept being interrupted, no free
+    /// file handles), <c>internal_error</c> (500) for any other failure to open or read (permission, I/O error),
     /// <c>bad_path</c> (400) when it is not a regular file or is not the file the resolver checked, <c>too_large</c> (413) when it
     /// is bigger than <paramref name="maxBytes"/>.
     /// </summary>
@@ -52,11 +58,20 @@ public interface IViewerFileSystem
 public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
 {
     private readonly Func<int, string?> _procLinkReader;
+    private readonly Func<string, int, (int Fd, int Errno)> _opener;
 
     /// <param name="procLinkReader">Test seam: where the open handle <c>fd</c> really points (null when that cannot be read). The default reads /proc/self/fd.</param>
-    public PosixViewerFileSystem(Func<int, string?>? procLinkReader = null)
+    /// <param name="opener">Test seam for <c>open(path, flags)</c>: the descriptor (negative on failure) and errno. The default calls libc.</param>
+    public PosixViewerFileSystem(Func<int, string?>? procLinkReader = null, Func<string, int, (int Fd, int Errno)>? opener = null)
     {
         _procLinkReader = procLinkReader ?? ReadProcLink;
+        _opener = opener ?? LibcOpen;
+    }
+
+    private static (int Fd, int Errno) LibcOpen(string path, int flags)
+    {
+        int fd = open(path, flags);
+        return (fd, fd < 0 ? Marshal.GetLastPInvokeError() : 0);
     }
 
     private const int O_RDONLY = 0;
@@ -68,8 +83,15 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
     private const uint STATX_BASIC_STATS = 0x7ff;
     private const int S_IFMT = 0xF000;
     private const int S_IFREG = 0x8000;
+    private const int ENOENT = 2;
     private const int EINTR = 4;
+    private const int EAGAIN = 11;
+    private const int ENOMEM = 12;
+    private const int ENOTDIR = 20;
+    private const int ENFILE = 23;
+    private const int EMFILE = 24;
     private const int ELOOP = 40;
+    private const int OpenAttempts = 8;
 
     /// <summary>O_NOFOLLOW differs between CPU families (x86: 0x20000, arm64: 0x8000).</summary>
     private static int NoFollowFlag => RuntimeInformation.ProcessArchitecture switch
@@ -91,10 +113,10 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
     [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
     private static extern int statx(int dirfd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, byte* buffer);
 
-    private readonly record struct StatInfo(int Mode, ulong Inode, ulong Device, long Size, long MtimeTicks)
+    private readonly record struct StatInfo(int Mode, ulong Inode, ulong Device, long Size, long MtimeTicks, long CtimeTicks)
     {
         public bool IsRegular => (Mode & S_IFMT) == S_IFREG;
-        public FileStamp Stamp => new(Size, MtimeTicks);
+        public FileStamp Stamp => new(Size, MtimeTicks, CtimeTicks, Inode);
         public FileIdentity Identity => new(Device, Inode);
     }
 
@@ -105,20 +127,30 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
     }
 
     // struct statx: the layout is the same on every architecture.
-    private static StatInfo? StatPath(string path, bool followLinks)
+    private static StatInfo? StatPath(string path, bool followLinks) => StatPath(path, followLinks, out _);
+
+    private static StatInfo? StatPath(string path, bool followLinks, out int errno)
     {
         RequireLinux();
+        errno = 0;
         byte* buffer = stackalloc byte[256];
         if (statx(AT_FDCWD, path, followLinks ? 0 : AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, buffer) != 0)
+        {
+            errno = Marshal.GetLastPInvokeError();
             return null;
+        }
         return Parse(buffer);
     }
 
-    private static StatInfo? StatHandle(int fd)
+    private static StatInfo? StatHandle(int fd, out int errno)
     {
+        errno = 0;
         byte* buffer = stackalloc byte[256];
         if (statx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS, buffer) != 0)
+        {
+            errno = Marshal.GetLastPInvokeError();
             return null;
+        }
         return Parse(buffer);
     }
 
@@ -127,11 +159,14 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
         int mode = *(ushort*)(b + 28);
         ulong inode = *(ulong*)(b + 32);
         long size = *(long*)(b + 40);
+        long ctimeSec = *(long*)(b + 96);
+        uint ctimeNsec = *(uint*)(b + 104);
         long mtimeSec = *(long*)(b + 112);
         uint mtimeNsec = *(uint*)(b + 120);
         ulong devMajor = *(uint*)(b + 136);
         ulong devMinor = *(uint*)(b + 140);
-        return new StatInfo(mode, inode, (devMajor << 32) | devMinor, size, mtimeSec * TimeSpan.TicksPerSecond + mtimeNsec / 100);
+        return new StatInfo(mode, inode, (devMajor << 32) | devMinor, size,
+            mtimeSec * TimeSpan.TicksPerSecond + mtimeNsec / 100, ctimeSec * TimeSpan.TicksPerSecond + ctimeNsec / 100);
     }
 
     public FileStamp? Stat(string path) => StatPath(path, followLinks: false)?.Stamp;
@@ -140,26 +175,24 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
 
     public FileRead Read(string path, long maxBytes, FileIdentity? expected)
     {
-        var first = StatPath(path, followLinks: false) ?? throw NotFound();
+        var first = StatPath(path, followLinks: false, out int statErrno) ?? throw Failure(statErrno);
         if (!first.IsRegular)
             throw new ViewerApiException(400, "bad_path", "not a regular file");   // also a symbolic link, FIFO, socket, device
 
         int fd;
-        int errno = 0;
+        int errno;
         int attempts = 0;
         do
         {
-            fd = open(path, O_RDONLY | NoFollowFlag | O_NONBLOCK | O_CLOEXEC);
-            if (fd < 0)
-                errno = Marshal.GetLastPInvokeError();
+            (fd, errno) = _opener(path, O_RDONLY | NoFollowFlag | O_NONBLOCK | O_CLOEXEC);
         }
-        while (fd < 0 && errno == EINTR && ++attempts < 8);   // a signal interrupted the call: try again
+        while (fd < 0 && errno == EINTR && ++attempts < OpenAttempts);   // a signal interrupted the call: try again
         if (fd < 0)
-            throw errno == ELOOP ? new ViewerApiException(400, "bad_path", "symbolic links are not allowed") : NotFound();
+            throw errno == ELOOP ? new ViewerApiException(400, "bad_path", "symbolic links are not allowed") : Failure(errno);
 
         try
         {
-            var opened = StatHandle(fd) ?? throw NotFound();
+            var opened = StatHandle(fd, out int openedErrno) ?? throw Failure(openedErrno);
             if (!opened.IsRegular)
                 throw new ViewerApiException(400, "bad_path", "not a regular file");
             if (opened.Identity != first.Identity || (expected.HasValue && opened.Identity != expected.Value))
@@ -178,8 +211,9 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
                     nint n = read(fd, p + total, bytes.Length - total);
                     if (n < 0)
                     {
-                        if (Marshal.GetLastPInvokeError() == EINTR) continue;
-                        throw NotFound();
+                        int readErrno = Marshal.GetLastPInvokeError();
+                        if (readErrno == EINTR) continue;
+                        throw Failure(readErrno);
                     }
                     if (n == 0) break;   // the file got shorter: the stamps below will differ
                     total += (int)n;
@@ -188,7 +222,7 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
             if (total < bytes.Length)
                 Array.Resize(ref bytes, total);
 
-            var after = StatHandle(fd) ?? throw NotFound();
+            var after = StatHandle(fd, out int afterErrno) ?? throw Failure(afterErrno);
             return new FileRead(bytes, opened.Stamp, after.Stamp);
         }
         finally
@@ -211,5 +245,15 @@ public sealed unsafe class PosixViewerFileSystem : IViewerFileSystem
 
     private static string? ReadProcLink(int fd) => new FileInfo("/proc/self/fd/" + fd).LinkTarget;
 
-    private static ViewerApiException NotFound() => new(404, "not_found", "image not found");
+    /// <summary>
+    /// What an errno means to the client. Only "there is no such file" is 404: a transient failure (an open that stayed
+    /// interrupted, no free handles or memory) is 503 so it is not read as "the file is missing", and anything else
+    /// (permission, I/O error) is 500.
+    /// </summary>
+    private static ViewerApiException Failure(int errno) => errno switch
+    {
+        ENOENT or ENOTDIR => new(404, "not_found", "image not found"),
+        EINTR or EAGAIN or EMFILE or ENFILE or ENOMEM => new(503, "busy", "the image could not be opened right now; retry shortly"),
+        _ => new(500, "internal_error", "the image could not be read"),
+    };
 }

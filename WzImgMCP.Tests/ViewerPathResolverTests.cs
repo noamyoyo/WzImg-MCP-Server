@@ -246,7 +246,7 @@ public sealed class ViewerPathResolverTests : IDisposable
     public void SymlinkedFile_IsRefused()
     {
         var link = Path.Combine(_owner, "img", "String", "Link.img");
-        Skip.IfNot(TrySymlink(link, Path.Combine(_owner, "img", "String", "Consume.img")), "symbolic links cannot be created here");
+        EnvRequire.Capability(TrySymlink(link, Path.Combine(_owner, "img", "String", "Consume.img")), "symbolic links cannot be created here");
         AssertError(Fails("owner", "String/Link.img"), 400, "bad_path");
     }
 
@@ -254,7 +254,7 @@ public sealed class ViewerPathResolverTests : IDisposable
     public void SymlinkedParentDirectory_IsRefused()
     {
         var link = Path.Combine(_owner, "img", "Alias");
-        Skip.IfNot(TryDirSymlink(link, Path.Combine(_owner, "img", "String")), "symbolic links cannot be created here");
+        EnvRequire.Capability(TryDirSymlink(link, Path.Combine(_owner, "img", "String")), "symbolic links cannot be created here");
         AssertError(Fails("owner", "Alias/Consume.img"), 400, "bad_path");
     }
 
@@ -264,7 +264,7 @@ public sealed class ViewerPathResolverTests : IDisposable
         var outside = Path.Combine(_tmp, "outside.img");
         File.WriteAllText(outside, "secret");
         var link = Path.Combine(_owner, "img", "String", "Out.img");
-        Skip.IfNot(TrySymlink(link, outside), "symbolic links cannot be created here");
+        EnvRequire.Capability(TrySymlink(link, outside), "symbolic links cannot be created here");
         AssertError(Fails("owner", "String/Out.img"), 400, "bad_path");
     }
 
@@ -274,7 +274,7 @@ public sealed class ViewerPathResolverTests : IDisposable
         var outsideDir = Directory.CreateDirectory(Path.Combine(_tmp, "outside-dir")).FullName;
         File.WriteAllText(Path.Combine(outsideDir, "x.img"), "secret");
         var link = Path.Combine(_owner, "img", "Escape");
-        Skip.IfNot(TryDirSymlink(link, outsideDir), "symbolic links cannot be created here");
+        EnvRequire.Capability(TryDirSymlink(link, outsideDir), "symbolic links cannot be created here");
         AssertError(Fails("owner", "Escape/x.img"), 400, "bad_path");
     }
 
@@ -282,7 +282,7 @@ public sealed class ViewerPathResolverTests : IDisposable
     public void DanglingSymlink_IsRefused()
     {
         var link = Path.Combine(_owner, "img", "String", "Dangling.img");
-        Skip.IfNot(TrySymlink(link, Path.Combine(_tmp, "does-not-exist")), "symbolic links cannot be created here");
+        EnvRequire.Capability(TrySymlink(link, Path.Combine(_tmp, "does-not-exist")), "symbolic links cannot be created here");
         AssertError(Fails("owner", "String/Dangling.img"), 400, "bad_path");
     }
 
@@ -293,7 +293,7 @@ public sealed class ViewerPathResolverTests : IDisposable
         Directory.CreateDirectory(Path.Combine(real, "String"));
         File.WriteAllText(Path.Combine(real, "String", "Consume.img"), "x");
         Directory.Delete(Path.Combine(_canon, "img"), recursive: true);
-        Skip.IfNot(TryDirSymlink(Path.Combine(_canon, "img"), real), "symbolic links cannot be created here");
+        EnvRequire.Capability(TryDirSymlink(Path.Combine(_canon, "img"), real), "symbolic links cannot be created here");
         AssertError(Fails("canon", "String/Consume.img"), 400, "bad_path");
     }
 
@@ -302,7 +302,7 @@ public sealed class ViewerPathResolverTests : IDisposable
     {
         // The root is the mount point; only what is below it is checked for links.
         var linkedRoot = Path.Combine(_tmp, "root-link");
-        Skip.IfNot(TryDirSymlink(linkedRoot, _owner), "symbolic links cannot be created here");
+        EnvRequire.Capability(TryDirSymlink(linkedRoot, _owner), "symbolic links cannot be created here");
         var resolver = new ViewerPathResolver(new Dictionary<string, string> { ["owner"] = linkedRoot });
         Assert.Equal(14, resolver.Resolve("owner", "String/Consume.img").SizeBytes);
     }

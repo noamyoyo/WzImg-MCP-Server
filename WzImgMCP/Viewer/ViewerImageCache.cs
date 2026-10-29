@@ -2,12 +2,14 @@ using MapleLib.WzLib;
 
 namespace WzImgMCP.Viewer;
 
-/// <summary>Cache key: a new mtime or size is a new key, and sources never share entries.</summary>
+/// <summary>Cache key: a new mtime, ctime, inode or size is a new key, and sources never share entries.</summary>
 /// <remarks>
-/// <c>Manifest</c> is the key the source's manifest names (empty when none), so a changed manifest is a new key. A file
-/// rewritten with the same size AND the same mtime is not detected.
+/// <c>Manifest</c> is the key the source's manifest names (empty when none), so a changed manifest is a new key.
+/// <c>CtimeTicks</c> cannot be set from user space, so a rewrite that restores size and mtime is still a new key; the
+/// inode catches a file replaced by another. What is NOT detected: a rewrite within the clock granularity of the file
+/// system that keeps the size.
 /// </remarks>
-public readonly record struct ImageKey(string Source, string Path, long MtimeTicks, long Size, string Manifest = "");
+public readonly record struct ImageKey(string Source, string Path, long MtimeTicks, long Size, string Manifest = "", long CtimeTicks = 0, ulong Inode = 0);
 
 /// <summary>
 /// A parsed image and what is known about it. Reference counted: the cache holds one reference and every user holds

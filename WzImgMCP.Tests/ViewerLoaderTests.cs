@@ -225,13 +225,101 @@ public sealed class ViewerLoaderTests : IDisposable
         AssertError(Fails(() => loader.Load(resolver.Resolve("owner", "A.img"), CancellationToken.None)), 409, "file_busy");
     }
 
+    // ---- the file stamp (ctime and inode) and open failures
+
+    [Fact]
+    public void Rewrite_WithSameSizeAndRestoredMtime_IsNotServedFromTheCache()
+    {
+        var path = ImgFixture.Write(_tree.Root("owner"), "A.img", ImgFixture.Build(i => i.AddProperty(new WzIntProperty("v", 1000))));
+        var (loader, resolver, _) = Make();
+        var mtime = File.GetLastWriteTimeUtc(path);
+        string firstSha;
+        using (var first = loader.Load(resolver.Resolve("owner", "A.img"), CancellationToken.None))
+            firstSha = first.Loaded.Sha256;
+
+        // one int replaced by another of the same encoded size, then the mtime put back (touch -r, rsync -t)
+        var replacement = ImgFixture.Build(i => i.AddProperty(new WzIntProperty("v", 1001)));
+        Assert.Equal(new FileInfo(path).Length, replacement.Length);
+        File.WriteAllBytes(path, replacement);
+        File.SetLastWriteTimeUtc(path, mtime);
+        Assert.Equal(mtime, File.GetLastWriteTimeUtc(path));
+
+        using var second = loader.Load(resolver.Resolve("owner", "A.img"), CancellationToken.None);
+        Assert.False(second.FromCache);
+        Assert.NotEqual(firstSha, second.Loaded.Sha256);
+        Assert.Equal(1001, ((WzIntProperty)second.Image["v"]!).Value);
+    }
+
+    [Fact]
+    public void FileReplacedByAnotherInode_WithSameSizeMtimeAndCtime_IsAnotherKey()
+    {
+        var fs = new PosixViewerFileSystem();
+        var path = ImgFixture.Write(_tree.Root("owner"), "A.img");
+        var a = fs.Stat(path)!.Value;
+        var b = a with { Inode = a.Inode + 1 };
+        Assert.NotEqual(new ImageKey("owner", "A.img", a.MtimeTicks, a.Size, "", a.CtimeTicks, a.Inode),
+                        new ImageKey("owner", "A.img", b.MtimeTicks, b.Size, "", b.CtimeTicks, b.Inode));
+        Assert.NotEqual(a, b);
+        Assert.True(a.CtimeTicks > 0);
+        Assert.True(a.Inode > 0);
+    }
+
+    [Fact]
+    public void Stat_ReportsCtimeThatChangesWhenMtimeIsRestored()
+    {
+        var fs = new PosixViewerFileSystem();
+        var path = ImgFixture.Write(_tree.Root("owner"), "A.img");
+        var before = fs.Stat(path)!.Value;
+        Thread.Sleep(20);
+        File.SetLastWriteTimeUtc(path, new DateTime(before.MtimeTicks + 621355968000000000L + 10_000_000L, DateTimeKind.Utc));
+        File.SetLastWriteTimeUtc(path, new DateTime(before.MtimeTicks + 621355968000000000L, DateTimeKind.Utc));
+        var after = fs.Stat(path)!.Value;
+        Assert.Equal(before.MtimeTicks, after.MtimeTicks);
+        Assert.NotEqual(before.CtimeTicks, after.CtimeTicks);
+        Assert.NotEqual(before, after);
+    }
+
+    [Theory]
+    [InlineData(4, 503, "busy")]       // EINTR on every attempt
+    [InlineData(24, 503, "busy")]      // EMFILE
+    [InlineData(13, 500, "internal_error")]   // EACCES
+    [InlineData(5, 500, "internal_error")]    // EIO
+    [InlineData(2, 404, "not_found")]  // ENOENT
+    public void OpenFailure_IsClassifiedByErrno_NotAlwaysNotFound(int errno, int status, string code)
+    {
+        var path = ImgFixture.Write(_tree.Root("owner"), "A.img");
+        int calls = 0;
+        var fs = new PosixViewerFileSystem(opener: (p, flags) => { calls++; return (-1, errno); });
+        AssertError(Fails(() => fs.Read(path, 1 << 20, null)), status, code);
+        Assert.Equal(errno == 4 ? 8 : 1, calls);   // an interrupted open is retried 8 times, nothing else is retried
+    }
+
+    [Fact]
+    public void OpenInterruptedFewerTimesThanTheLimit_Succeeds()
+    {
+        var path = ImgFixture.Write(_tree.Root("owner"), "A.img");
+        int calls = 0;
+        var fs = new PosixViewerFileSystem(opener: (p, flags) => ++calls < 4 ? (-1, 4) : OpenViaLibc(p, flags));
+        Assert.NotEmpty(fs.Read(path, 1 << 20, null).Bytes);
+        Assert.Equal(4, calls);
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int libcOpen([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, int flags);
+
+    private static (int, int) OpenViaLibc(string path, int flags)
+    {
+        int fd = libcOpen(path, flags);
+        return (fd, fd < 0 ? System.Runtime.InteropServices.Marshal.GetLastPInvokeError() : 0);
+    }
+
     // ---- the safe open
 
     [SkippableFact]
     public void Fifo_IsRefusedWithoutBlocking()
     {
         var fifo = Path.Combine(_tree.Root("owner"), "img", "Pipe.img");
-        Skip.IfNot(ImgFixture.TryMakeFifo(fifo), "mkfifo is not available");
+        EnvRequire.Capability(ImgFixture.TryMakeFifo(fifo), "mkfifo is not available");
         var (loader, resolver, _) = Make();
 
         ViewerApiException? error = null;
@@ -250,7 +338,7 @@ public sealed class ViewerLoaderTests : IDisposable
     {
         var real = ImgFixture.Write(_tree.Root("owner"), "Real.img");
         var link = Path.Combine(_tree.Root("owner"), "img", "Link.img");
-        Skip.IfNot(ImgFixture.TrySymlink(link, real, directory: false), "symbolic links cannot be created here");
+        EnvRequire.Capability(ImgFixture.TrySymlink(link, real, directory: false), "symbolic links cannot be created here");
         AssertError(Fails(() => new PosixViewerFileSystem().Read(link, 1 << 20, null)), 400, "bad_path");
     }
 
@@ -268,7 +356,7 @@ public sealed class ViewerLoaderTests : IDisposable
         File.WriteAllBytes(Path.Combine(other, "A.img"), ImgFixture.Bytes(WzMapleVersion.BMS));
         var dir = Path.Combine(_tree.Root("owner"), "img", "Dir");
         Directory.Delete(dir, true);
-        Skip.IfNot(ImgFixture.TrySymlink(dir, other, directory: true), "symbolic links cannot be created here");
+        EnvRequire.Capability(ImgFixture.TrySymlink(dir, other, directory: true), "symbolic links cannot be created here");
 
         AssertError(Fails(() => loader.Load(resolved, CancellationToken.None)), 400, "bad_path");
     }

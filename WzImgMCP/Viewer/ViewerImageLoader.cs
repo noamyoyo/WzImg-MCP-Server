@@ -102,7 +102,7 @@ public sealed class ViewerImageLoader
 
         var preferred = PreferredKey(resolved.Source);
         var manifest = preferred?.ToString() ?? "";
-        var lookup = new ImageKey(resolved.Source, resolved.RelativePath, stamp.MtimeTicks, stamp.Size, manifest);
+        var lookup = new ImageKey(resolved.Source, resolved.RelativePath, stamp.MtimeTicks, stamp.Size, manifest, stamp.CtimeTicks, stamp.Inode);
 
         while (true)
         {
@@ -205,7 +205,7 @@ public sealed class ViewerImageLoader
         var read = ReadStable(resolved);
 
         // The stamp of the bytes actually read is the key, not the earlier stat.
-        var key = new ImageKey(resolved.Source, resolved.RelativePath, read.After.MtimeTicks, read.After.Size, manifest);
+        var key = new ImageKey(resolved.Source, resolved.RelativePath, read.After.MtimeTicks, read.After.Size, manifest, read.After.CtimeTicks, read.After.Inode);
         var hit = _cache.TryGet(key);
         if (hit != null)
             return hit;

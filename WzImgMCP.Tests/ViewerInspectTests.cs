@@ -401,7 +401,7 @@ public sealed class ViewerInspectTests : IAsyncLifetime
     {
         ImgFixture.Write(_tree.Root("canon"), "Real/B.img");
         var link = Path.Combine(_tree.Root("owner"), "img", "Alias");
-        Skip.IfNot(ImgFixture.TrySymlink(link, Path.Combine(_tree.Root("canon"), "img", "Real"), directory: true), "symbolic links cannot be created here");
+        EnvRequire.Capability(ImgFixture.TrySymlink(link, Path.Combine(_tree.Root("canon"), "img", "Real"), directory: true), "symbolic links cannot be created here");
         ImgFixture.Write(_tree.Root("owner"), "A.img", WzMapleVersion.BMS, WithLink("link", "Alias/B.img/1"));
         var (loader, resolver) = Services();
         Assert.Equal(0, Inspect(loader, resolver, "owner", "A.img").Links.OutlinksResolved);
