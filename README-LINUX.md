@@ -139,6 +139,12 @@ Tests: `dotnet test WzImgMCP.Tests -p:LinuxBuild=true`.
 | `WZIMG_HOST` / `--host` | Address the HTTP transport binds to. The default is localhost. IPv6 literals are bracketed automatically. The image does **not** set it, so inside a container you must pass `--host 0.0.0.0` for other containers to reach the server. |
 | `WZIMG_DEFAULT_DATA_PATH` | Folder (an extracted IMG tree with `manifest.json`) that is opened automatically by the first tool call that needs the data source, so no `init_data_source` is needed after a restart. Default `/data/img`. The path must pass `WZIMG_ALLOWED_ROOT`. If the folder is missing, has no `manifest.json` or is outside the root, nothing is opened and the tools answer "No data source initialized. Call init_data_source first." (the next call tries again). `init_data_source` still works and always wins: after it the default folder is never opened again. `get_data_source_info` shows `auto_initialized: true` or `false`. Two simultaneous first calls open the folder once. |
 | `WZIMG_SESSION_IDLE_SECONDS` | How long an HTTP MCP session may be idle (no request in flight) before the server closes it; the next request with that session id then gets `404 Session not found`. Default `604800` (7 days), accepted range `10` to `604800`; anything else (text, decimals, out of range) falls back to the default and logs a warning at startup. The effective values are logged at startup. See "HTTP sessions" below. |
+| `WZIMG_CACHE_MB` | Size limit of the image cache in MB (default `400`, accepted `16` to `65536`; anything else keeps the default). It is the same setting as `HaCreatorConfig` `Cache.MaxMemoryCacheMB`, which the server fills from this variable. Since the size estimate was calibrated (see "Memory and big categories") the figure approximates the real managed memory the cached images hold. |
+| `WZIMG_SCAN_MAX_IMAGES` | How many images a scan may cover (default `150`): `search_by_name`, `search_by_value`, `find_broken_uols`, `batch_search` and `get_category_summary` with `detailed=true`. A larger scope is refused with `scope_too_wide` before any image is opened. |
+| `WZIMG_SCAN_BUDGET_SECONDS` | Time budget of a scan in seconds (default `20`, `0` = none). When it ends, the matches found so far come back with `truncated: true`. |
+| `WZIMG_BULK_MAX_IMAGES` | Sanity cap for the tools that work through a whole category on purpose, `preload_category` and `batch_export_images` (default `2000`). Above it they refuse with `scope_too_wide` unless `force=true`. |
+| `WZIMG_MEMORY_SOFT_LIMIT_MB` | Managed heap size (`GC.GetTotalMemory(false)`) above which the memory guard trims (default `1536`, `0` = never for size). |
+| `WZIMG_IDLE_TRIM_SECONDS` | Seconds without any tool call after which the memory guard trims once (default `300`, `0` = never when idle). |
 | `WZIMG_TEST_WZ_PATH` | Tests only: a directory containing `String.wz` (GMS key, version 83). The image tests on real canvases also use `Morph.wz`, `Ui.wz` and `Etc.wz` from the same directory when they are there. Tests that need real data skip when it is not set. |
 
 ### HTTP sessions
@@ -167,6 +173,53 @@ If that file or its folder has been removed while the image was loaded, `save_im
 write (`success: false`, the file on disk unchanged). After a successful save every cache entry of the image is dropped, so
 the next access reads the file that was written. Images with unsaved edits are never evicted from the cache (the cache may
 grow past its size limit) and survive `clear_cache`; `save_image` or `discard_changes` ends that.
+
+### Memory and big categories
+
+A category such as `Map` holds thousands of images (5,622 images, 628 MB of files in the data this was measured on). Before this
+change `list_images_in_category Map` opened and parsed every one of them to read their names: 60 s on a cold server (MCP clients
+give up after 30 s), 400,000 characters of answer and 1.6 GiB of memory (measured, `--memory 3g`). Now:
+
+| Tool | Behaviour |
+| --- | --- |
+| `list_images_in_category` | Names only, nothing is opened or parsed. Sorted by ordinal name. `limit` (default 200, maximum 1000) and `offset` (default 0); the answer has `total`, `returned`, `offset`, `limit`, `has_more` (printed only when true, like every flag in the text results) and `next_offset` (absent on the last page). `full_path` is now the real path inside the category (`Map/Obj/x.img`), where it used to be `category/file name`. The same paging applies to `subdirectory`. |
+| `get_category_summary` | Opens nothing: image count, total file size, subdirectories, and one page (`limit`, `offset`, as above) of images with `size_bytes`. `detailed=true` brings back the property, canvas and sound counts per image; it opens the images of the page, so it goes through the scan guard. |
+| `search_by_name`, `search_by_value`, `find_broken_uols`, `batch_search` | Scan guard (below). `category` is required unless `image` is given. |
+| `get_statistics`, `get_parsed_images`, `unload_category` | Work on the category index and on what is in the cache; they no longer load every image to count or list them. `get_parsed_images` therefore lists the images in the cache that are parsed (it used to load, and so list, every image). `unload_category` also drops the images from the cache. |
+| `preload_category` | Refused above `WZIMG_BULK_MAX_IMAGES` images unless `force=true`. Stops when the cache is 95% full (`stopped_at_cache_limit`), because going on only pushes out what was loaded a moment ago. |
+| `batch_export_images` | Same cap and `force`. The images are read one after the other and not kept in the cache. |
+| `get_cache_stats` | Also reports `pinned_image_count`, `cache_limit_bytes`, `managed_heap_bytes`, `process_working_set_bytes`, `trim_count`, `last_trim_utc`, `last_trim_reason` and `last_trim_released_images`. |
+
+**Scan guard.** One helper (`ScanGuard`) is used by every tool that goes through many images. It first counts the images from the
+category index; if there are more than `WZIMG_SCAN_MAX_IMAGES` the call fails with `error_code: scope_too_wide` and a message that
+says how many images the category has and suggests `image` or a paged `list_images_in_category`. Otherwise the images are scanned
+one after the other under the time budget (`WZIMG_SCAN_BUDGET_SECONDS`; at least one image is always scanned). The result carries
+`scanned_images` and `total_images`, and `truncated: true` with `truncated_reason` (`max_results` or `time_budget`) when it is partial.
+A category given without an image is `category_required`. An image the scan has to load is read, parsed, searched and **disposed**:
+it never enters the cache, so a scan leaves the cache and its hit and miss counters as they were. An image that is already cached
+(this includes every image with unsaved edits, which a scan therefore sees as edited) is used as it is and not touched.
+
+**Memory guard.** A timer looks every 30 s at the managed heap and at the time of the last tool call. When the heap is above
+`WZIMG_MEMORY_SOFT_LIMIT_MB` (at most once a minute), or no tool call happened for `WZIMG_IDLE_TRIM_SECONDS` (once per quiet
+period), it drops every cached image without unsaved edits and runs a blocking, compacting collection that asks the runtime to
+give memory back (`GCCollectionMode.Aggressive`, LOH compaction). Images with unsaved edits are never touched. It takes no lock
+of the session and two ticks never overlap. Each trim logs one line with counts only, for example
+`[MemoryGuard] trim (idle): released 860 cached image(s), kept 0 with unsaved edits; managed heap 377 MB -> 2 MB`. A tool call that
+is cut by a trim just reloads the image from disk the next time; the one residual is an edit that is made in the instants between
+an image being fetched from the cache and its `Changed` flag being set while a soft limit trim runs (the same window an ordinary
+cache eviction has always had).
+
+**The size estimate.** The cache evicts when the sum of `ImgFileSystemManager.EstimateWzImageSize` passes the limit. That estimate
+used 100 bytes per property and was 2.0x to 4.8x below the real managed heap (measured over 13 categories), so a "512 MB" cache held
+1.1 GB and more, and evicted images lingered until the next full collection. It now uses the measured cost of each kind of property
+(see the comment above the constants in `ImgFileSystemManager.cs`). Measured with `GC.GetTotalMemory(true)` after loading real images
+(heap growth divided by the estimate, 1.00 = exact): Map 0.96 (300 and 1,000 images), Mob 0.97, Character 0.98, Item 0.98, Skill 0.95,
+Ui 0.97, String 1.01, Reactor 1.06, Npc 1.13. The factor before: Map 2.1, Mob 3.6, Character 3.4, Item 3.0, Skill 2.9, Npc 4.8.
+The estimate counts the parsed property tree; payloads that are read later (a canvas bitmap, a sound) are counted only while they
+are held, so the guard above looks at the real heap as well.
+
+The Dockerfile sets `DOTNET_gcServer=0` (workstation GC: one heap, not one per core). `DOTNET_GCConserveMemory` was tried at 5, 7 and 9
+and changed nothing measurable (see the comment in the Dockerfile), so it is not set.
 
 ## Security notes
 
@@ -336,6 +389,23 @@ Phase 2 additions (these also apply to a Windows build and have not been tested 
     real directory instead of linking to it. The backup file name is chosen before the image is serialised, so two saves of the same
     image within the same second can collide on the backup name and the second fails (nothing is lost).
 
+    Memory and big categories (all of these also apply to a Windows build and have not been tested there; see "Memory and big categories"):
+
+31. **MapleLib: `IDataSource.GetImagePathsInCategory`** is a new interface member (names of all images of a category, sorted, nothing
+    opened), implemented by the IMG, WZ and hybrid sources. An implementation outside this repository has to add it. New members
+    that are not part of the interface: `ImgFileSystemManager.OpenImageUncached`, `GetImageFileSize`, `GetCachedImages`,
+    `ReleaseUnpinnedImages`, `PinnedImageCount`, `LRUCache.TryPeek` and `CountPinned`; `LRUCache.ClearUnpinned` now returns the number
+    of items it removed (it returned nothing).
+32. **MapleLib: the size estimate of the image cache** (`ImgFileSystemManager.EstimateWzImageSize`, now public) is about 2x to 5x higher
+    than before, because it now counts what an image really occupies. The same `MaxMemoryCacheMB` therefore keeps fewer images than
+    it did, and the limit is no longer far below the real memory. `DataSourceStats` has two new fields, `CacheLimitBytes` and `PinnedImageCount`.
+33. **Server: tool results.** `list_images_in_category` is paged (200 by default) and its `full_path` is the real path of nested images;
+    `search_by_name` and `search_by_value` without `image` need a `category` and refuse a category above `WZIMG_SCAN_MAX_IMAGES`
+    images; `find_broken_uols` and `batch_search` are limited the same way (`batch_search` with its default `all` therefore fails on a
+    big data set); scan results name an image by its path in the category; `get_category_summary` no longer counts properties unless
+    `detailed=true` and lists one page; `get_parsed_images` lists only cached images; `unload_category` leaves images that are not
+    cached alone and drops the others from the cache. `Result<T>` and the result types of the changed tools have an `error_code`.
+
 Path audit of the tools: the only tool code that joins a user supplied string into a path with `Path.Combine` is in `BatchTools`
 (`batch_export_images` category: checked as a plain name; image directory and canvas file names: sanitised, unique, and written through
 `PathGuard`; `pack_to_wz` / `extract_to_img` categories: see 23). Every other tool passes its path argument through `PathGuard.Resolve`
@@ -360,5 +430,8 @@ combined path against the version directory (lexically, symbolic links inside th
   The upstream test `ModifyToolsTests.CanvasAndPersistenceOps_Work` accepts an error from `set_canvas_bitmap`, and its
   1x1 PNG has wrong checksums (bad IDAT CRC, zlib stream without Adler-32) that libpng rejects, so that test no longer
   proves the image path; `CanvasImagingTests` covers it with a valid PNG and a strict assertion.
+- Tests after the memory and big category work: 514 tests; without `WZIMG_TEST_WZ_PATH` 487 pass and 27 skip (474 tests, 447 pass and 27 skip before it). Not run
+  with the real WZ data variable. The estimate calibration and the container figures above were measured on a real 2 GB extracted v83 tree
+  (not part of the tests, which build their own small trees).
 - The packer's multi-IV fallback and the Lua IV preference were checked with `String.wz` (GMS) and mixed-key
   trees; the Lua preference has not been exercised against a real Lua data set.

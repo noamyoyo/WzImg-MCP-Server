@@ -194,12 +194,13 @@ public class BatchTools
         }
     }
 
-    [McpServerTool(Name = "batch_export_images"), Description("Export all images from multiple categories")]
+    [McpServerTool(Name = "batch_export_images"), Description("Export all images from multiple categories. Refused when the categories hold more than WZIMG_BULK_MAX_IMAGES (default 2000) images, unless force is set.")]
     public string BatchExportImages(
         [Description("Categories to export (comma-separated, or 'all')")] string categories,
         [Description("Output directory")] string outputDir,
         [Description("Output format (png, jpg)")] string format = "png",
-        [Description("Maximum images to export")] int maxImages = 1000)
+        [Description("Maximum images to export")] int maxImages = 1000,
+        [Description("Export even when the categories hold more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false)
     {
         if (!_session.IsInitialized)
         {
@@ -226,6 +227,11 @@ public class BatchTools
             foreach (var category in categoryList)
                 PathGuard.RequireSafeComponent(category, "category");
 
+            // The images are read one after the other and not kept (see ScanGuard.Run), but a call that goes through
+            // thousands of them is asked for twice.
+            ScanGuard.RequireWithinBulkCap(_session, categoryList, force,
+                "Export fewer categories, lower maxImages is not enough because every image is read, or pass force=true to export anyway.");
+
             if (!Directory.Exists(outputDir))
             {
                 Directory.CreateDirectory(outputDir);
@@ -246,27 +252,28 @@ public class BatchTools
                 // names can sanitise to the same one, so the directory names are made unique per category.
                 var imageDirNames = PathGuard.NewNameSet();
 
-                foreach (var img in ds.GetImagesInCategory(category))
+                var plan = ScanGuard.PlanCategories(_session, new[] { category }, int.MaxValue, "", "", force: true);
+                var scan = ScanGuard.Run(_session, plan, (img, cat, name) =>
                 {
-                    if (totalExported >= maxImages) break;
+                    if (totalExported >= maxImages) return true;
 
                     try
                     {
-                        var wasParsed = img.Parsed;
-                        if (!img.Parsed) img.ParseImage();
-
                         var imageDir = Path.Combine(categoryDir, PathGuard.UniqueName(
                             PathGuard.SanitizeFileName(Path.GetFileNameWithoutExtension(img.Name), "image"), imageDirNames));
                         ExportCanvasesFromImage(img, imageDir, extension, exported, failed, ref totalExported, maxImages);
-
-                        if (!wasParsed) img.UnparseImage();
                     }
                     catch (PathNotAllowedException) { throw; }
                     catch (Exception ex)
                     {
-                        failed.Add($"{category}/{img.Name}: {ex.Message}");
+                        failed.Add($"{category}/{name}: {ex.Message}");
                     }
-                }
+
+                    return totalExported >= maxImages;
+                }, applyBudget: false);
+
+                if (scan.Failed > 0)
+                    failed.Add($"{category}: {scan.Failed} image(s) could not be read");
             }
 
             return new BatchExportImagesResult
@@ -282,11 +289,11 @@ public class BatchTools
         }
         catch (Exception ex)
         {
-            return new BatchExportImagesResult { Success = false, Error = ex.Message };
+            return new BatchExportImagesResult { Success = false, Error = ex.Message, ErrorCode = ToolErrorException.CodeOf(ex) };
         }
     }
 
-    [McpServerTool(Name = "batch_search"), Description("Search across multiple categories")]
+    [McpServerTool(Name = "batch_search"), Description("Search across multiple categories; the categories together may hold at most WZIMG_SCAN_MAX_IMAGES (default 150) images, otherwise the call is refused (scope_too_wide). Stops early when the time budget (WZIMG_SCAN_BUDGET_SECONDS) ends.")]
     public string BatchSearch(
         [Description("Search pattern (supports wildcards)")] string pattern,
         [Description("Categories to search (comma-separated, or 'all')")] string categories = "all",
@@ -315,29 +322,21 @@ public class BatchTools
             var results = new List<BatchSearchMatch>();
             var regex = WildcardToRegex(pattern);
 
-            foreach (var category in categoryList)
+            var plan = ScanGuard.PlanScan(_session, categoryList.ToList(),
+                "Search one category at a time, or one image with search_by_name / search_by_value; list_images_in_category pages through the image names of a category.");
+            var scan = ScanGuard.Run(_session, plan, (img, category, name) =>
             {
-                if (results.Count >= maxResults) break;
-
-                foreach (var img in ds.GetImagesInCategory(category))
+                try
                 {
-                    if (results.Count >= maxResults) break;
-
-                    try
-                    {
-                        var wasParsed = img.Parsed;
-                        if (!img.Parsed) img.ParseImage();
-
-                        SearchInImage(img, category, img.Name, regex, searchType, results, maxResults);
-
-                        if (!wasParsed) img.UnparseImage();
-                    }
-                    catch
-                    {
-                        // Skip images that can't be parsed
-                    }
+                    SearchInImage(img, category, name, regex, searchType, results, maxResults);
                 }
-            }
+                catch
+                {
+                    // Skip images that can't be searched
+                }
+
+                return results.Count >= maxResults;
+            });
 
             return new BatchSearchResult
             {
@@ -345,13 +344,16 @@ public class BatchTools
                 Pattern = pattern,
                 SearchType = searchType,
                 ResultCount = results.Count,
-                Truncated = results.Count >= maxResults,
+                Truncated = results.Count >= maxResults || scan.BudgetExhausted,
+                TruncatedReason = scan.BudgetExhausted ? "time_budget" : results.Count >= maxResults ? "max_results" : null,
+                ScannedImages = scan.Scanned,
+                TotalImages = scan.Total,
                 Results = results
             };
         }
         catch (Exception ex)
         {
-            return new BatchSearchResult { Success = false, Error = ex.Message };
+            return new BatchSearchResult { Success = false, Error = ex.Message, ErrorCode = ToolErrorException.CodeOf(ex) };
         }
     }
 
@@ -676,6 +678,7 @@ public class BatchExportImagesResult : MarkdownResultBase
 {
     public bool Success { get; set; }
     public string? Error { get; set; }
+    public string? ErrorCode { get; set; }
     public string? OutputDirectory { get; set; }
     public int ExportedCount { get; set; }
     public int FailedCount { get; set; }
@@ -688,10 +691,14 @@ public class BatchSearchResult : MarkdownResultBase
 {
     public bool Success { get; set; }
     public string? Error { get; set; }
+    public string? ErrorCode { get; set; }
     public string? Pattern { get; set; }
     public string? SearchType { get; set; }
     public int ResultCount { get; set; }
     public bool Truncated { get; set; }
+    public string? TruncatedReason { get; set; }
+    public int ScannedImages { get; set; }
+    public int TotalImages { get; set; }
     public List<BatchSearchMatch>? Results { get; set; }
 }
 

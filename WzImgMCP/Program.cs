@@ -60,6 +60,7 @@ class Program
             .WithToolsFromAssembly();
 
         var host = builder.Build();
+        StartMemoryGuard(host.Services, host.Services.GetRequiredService<ILogger<Program>>());
         await host.RunAsync();
     }
 
@@ -117,10 +118,29 @@ class Program
         logger.LogInformation("Default data folder (opened by the first tool call that needs it): {Path}",
             app.Services.GetRequiredService<WzSessionManager>().DefaultDataPath);
 
+        StartMemoryGuard(app.Services, logger);
+
         // Map MCP endpoints (supports both Streamable HTTP and legacy SSE)
         app.MapMcp();
 
         await app.RunAsync();
+    }
+
+    /// <summary>
+    /// Logs the memory and scan settings and starts the timer of the memory guard (it trims the cache and the managed heap
+    /// when the heap is above WZIMG_MEMORY_SOFT_LIMIT_MB or the server has been idle for WZIMG_IDLE_TRIM_SECONDS).
+    /// </summary>
+    private static void StartMemoryGuard(IServiceProvider services, ILogger logger)
+    {
+        var session = services.GetRequiredService<WzSessionManager>();
+        var guard = session.MemoryGuard.Settings;
+        var scan = session.ScanLimits;
+        logger.LogInformation(
+            "Memory: image cache limit {CacheMb} MB (WZIMG_CACHE_MB); trim at managed heap above {SoftMb} MB or after {IdleSeconds} s without a tool call (0 = off); " +
+            "scans: at most {ScanMax} images, {Budget} s budget (0 = none); bulk tools: at most {BulkMax} images unless force",
+            ServerSettings.CacheMb, guard.SoftLimitBytes / 1048576, (int)guard.IdleTrim.TotalSeconds,
+            scan.MaxImages, (int)scan.Budget.TotalSeconds, scan.BulkMaxImages);
+        session.StartMemoryGuard(message => logger.LogInformation("{Message}", message));
     }
 
     private static TransportMode ParseTransportMode(string[] args)
