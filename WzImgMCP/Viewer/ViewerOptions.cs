@@ -13,6 +13,7 @@ public sealed class ViewerOptions
 {
     public const string TokenEnvVar = "WZ_VIEWER_TOKEN";
     public const int MinTokenLength = 32;
+    public const int MinDistinctTokenCharacters = 8;
     public const string TokenHeader = "X-Viewer-Token";
 
     /// <summary>Source names, in the order they are reported. Every request names one of these.</summary>
@@ -23,8 +24,11 @@ public sealed class ViewerOptions
     public const int DefaultMaxConcurrentRequests = 4;
     public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(30);
 
-    /// <summary>The secret every request must carry in the <c>X-Viewer-Token</c> header.</summary>
+    /// <summary>The secret every request must carry in the <c>X-Viewer-Token</c> header (already trimmed).</summary>
     public string Token { get; }
+
+    /// <summary>Set when the token is valid but weak (fewer than <see cref="MinDistinctTokenCharacters"/> distinct characters). Never contains the token.</summary>
+    public string? Warning { get; }
 
     /// <summary>Source name to root directory (full path). Each root holds an <c>img</c> folder with the extracted tree.</summary>
     public IReadOnlyDictionary<string, string> Roots { get; }
@@ -37,10 +41,16 @@ public sealed class ViewerOptions
 
     public ViewerOptions(string? token, IReadOnlyDictionary<string, string> roots)
     {
+        token = token?.Trim();   // a trailing newline from a secret file is not part of the token (an HTTP header value is trimmed too)
         if (string.IsNullOrEmpty(token))
             throw new ViewerConfigException($"{TokenEnvVar} is not set. The viewer refuses to start without a token of at least {MinTokenLength} characters.");
         if (token.Length < MinTokenLength)
             throw new ViewerConfigException($"{TokenEnvVar} is too short ({token.Length} characters). The viewer needs at least {MinTokenLength} characters.");
+        // Printable ASCII without space only: anything else cannot be sent reliably in an HTTP header.
+        if (token.Any(c => c <= ' ' || c > '~'))
+            throw new ViewerConfigException($"{TokenEnvVar} contains a character that is not allowed (non-ASCII, whitespace or control character). Use printable ASCII without spaces.");
+        if (token.Distinct().Count() < MinDistinctTokenCharacters)
+            Warning = $"{TokenEnvVar} has fewer than {MinDistinctTokenCharacters} distinct characters and is easy to guess; use a random value.";
 
         foreach (var name in SourceNames)
             if (!roots.ContainsKey(name))

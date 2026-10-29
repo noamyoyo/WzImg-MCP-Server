@@ -105,9 +105,31 @@ public sealed class ViewerPathResolverTests : IDisposable
     {
         WriteImg(_owner, "Backups2/y.img", "y");
         WriteImg(_owner, "String/Backups.img", "z");
+        WriteImg(_owner, "String/MyBackups/w.img", "w");
         Assert.Equal(1, _resolver.Resolve("owner", "Backups2/y.img").SizeBytes);
         Assert.Equal(1, _resolver.Resolve("owner", "String/Backups.img").SizeBytes);
+        Assert.Equal(1, _resolver.Resolve("owner", "String/MyBackups/w.img").SizeBytes);
     }
+
+    [SkippableFact]
+    public void UnsearchableFolder_IsNotFound_NotAnException()
+    {
+        Skip.If(Environment.IsPrivilegedProcess, "root can search any folder");
+        var locked = Path.Combine(_owner, "img", "Locked");
+        WriteImg(_owner, "Locked/x.img", "x");
+        try
+        {
+            File.SetUnixFileMode(locked, UnixFileMode.None);
+            AssertError(Fails("owner", "Locked/x.img"), 404, "not_found");
+            AssertError(Fails("owner", "Locked/deeper/x.img"), 404, "not_found");
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked, UnixFileMode.UserRead | UserWriteExec());   // so Dispose can delete it
+        }
+    }
+
+    private static UnixFileMode UserWriteExec() => UnixFileMode.UserWrite | UnixFileMode.UserExecute;
 
     // ---- bad_path (text rules)
 
@@ -135,6 +157,9 @@ public sealed class ViewerPathResolverTests : IDisposable
     [InlineData("Backups/x.img")]
     [InlineData("backups/x.img")]
     [InlineData("BACKUPS/x.img")]
+    [InlineData("X/Backups/a.img")]            // Backups is refused as any segment, not only the first
+    [InlineData("String/BACKUPS/a.img")]
+    [InlineData("A/B/backups/c.img")]
     [InlineData(".x/y.img")]
     [InlineData("String/.hidden.img")]
     [InlineData("String/.img")]

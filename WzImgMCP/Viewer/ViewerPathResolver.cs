@@ -25,10 +25,15 @@ public sealed record ResolvedImage(string Source, string RelativePath, string Fu
 ///
 /// The path must match a strict pattern before the file system is touched: only ASCII letters, digits, space,
 /// '_', '-', '.' and '/' as separator, no empty segment, no segment that starts with '.', last segment ends with
-/// ".img", first segment is not "Backups", at most 260 characters. Then every component is checked on disk: no
-/// symbolic link anywhere between the root's <c>img</c> folder and the file, the file is a regular file, and the
+/// ".img", no segment is "Backups" (any case), at most 260 characters. Then every component is checked on disk: no
+/// symbolic link anywhere between the root's <c>img</c> folder and the file, the file is not a directory, and the
 /// fully resolved path is inside the <c>img</c> folder (and inside WZIMG_ALLOWED_ROOT, when that is set).
 /// Names are compared as they are: Linux is case-sensitive and nothing is lower-cased.
+///
+/// Limits in V1: "not a directory" is all the type check does, so a FIFO or device file named x.img would pass, and
+/// the path is checked, not an open handle (a race between check and use is possible). The resolver only reports a
+/// size, so this is harmless now. The code that opens the file (V2) must lstat/fstat for S_IFREG, open with
+/// O_NOFOLLOW | O_NONBLOCK, and compare device and inode of the opened handle with the checked path.
 /// </summary>
 public class ViewerPathResolver
 {
@@ -55,22 +60,30 @@ public class ViewerPathResolver
         var segments = ValidatePattern(path);
 
         var imgRoot = Path.Combine(root, ImgFolder);
-        if (new FileInfo(imgRoot).LinkTarget != null)
-            throw new ViewerApiException(400, "bad_path", "the source folder is a symbolic link");
-        if (!Directory.Exists(imgRoot))
-            throw new ViewerApiException(404, "not_found", "image not found");
-
-        // Walk down one component at a time, so a link in any parent folder (or in the file itself) is seen.
         var current = imgRoot;
-        for (int i = 0; i < segments.Length; i++)
+        try
         {
-            current = Path.Combine(current, segments[i]);
-            if (new FileInfo(current).LinkTarget != null)
-                throw new ViewerApiException(400, "bad_path", "symbolic links are not allowed");
-
-            bool last = i == segments.Length - 1;
-            if (last ? !File.Exists(current) : !Directory.Exists(current))   // File.Exists is false for a directory
+            if (new FileInfo(imgRoot).LinkTarget != null)
+                throw new ViewerApiException(400, "bad_path", "the source folder is a symbolic link");
+            if (!Directory.Exists(imgRoot))
                 throw new ViewerApiException(404, "not_found", "image not found");
+
+            // Walk down one component at a time, so a link in any parent folder (or in the file itself) is seen.
+            for (int i = 0; i < segments.Length; i++)
+            {
+                current = Path.Combine(current, segments[i]);
+                if (new FileInfo(current).LinkTarget != null)
+                    throw new ViewerApiException(400, "bad_path", "symbolic links are not allowed");
+
+                bool last = i == segments.Length - 1;
+                if (last ? !File.Exists(current) : !Directory.Exists(current))   // File.Exists is false for a directory
+                    throw new ViewerApiException(404, "not_found", "image not found");
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            // A folder that cannot be searched or read: to the client the image is simply not there.
+            throw new ViewerApiException(404, "not_found", "image not found");
         }
 
         // Defence in depth: the walk above already refused links, so this holds by construction. Re-check it on the
@@ -133,8 +146,9 @@ public class ViewerPathResolver
                 throw Bad("path has a segment that starts with '.'");   // also covers ".", ".." and hidden names
         }
 
-        if (string.Equals(segments[0], "Backups", StringComparison.OrdinalIgnoreCase))
-            throw Bad("path is in the Backups folder");
+        foreach (var segment in segments)
+            if (string.Equals(segment, "Backups", StringComparison.OrdinalIgnoreCase))
+                throw Bad("path is in a Backups folder");
         if (!segments[^1].EndsWith(ImgExtension, StringComparison.Ordinal))
             throw Bad("path must end with .img");
 

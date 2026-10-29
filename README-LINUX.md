@@ -177,13 +177,13 @@ that writes a file is reachable through it, and it has no MCP endpoints (`/`, `/
 
 | Name | Meaning |
 | --- | --- |
-| `WZ_VIEWER_TOKEN` | **Required**, at least 32 characters. The process prints a reason on standard error and exits with code 2 when it is missing or shorter. Every request, `/v1/health` included, must carry it in the `X-Viewer-Token` header (compared in constant time); otherwise the answer is 401 `unauthorized`. |
+| `WZ_VIEWER_TOKEN` | **Required**, at least 32 characters of printable ASCII without spaces (surrounding whitespace is trimmed; anything else makes startup fail). A token with fewer than 8 distinct characters starts with a warning on standard error. The process prints a reason on standard error and exits with code 2 when it is missing or shorter. Every request, `/v1/health` included, must carry it in the `X-Viewer-Token` header (compared in constant time); otherwise the answer is 401 `unauthorized`. |
 | `WZ_VIEWER_ROOT_CANON`, `WZ_VIEWER_ROOT_OWNER`, `WZ_VIEWER_ROOT_FRIEND` | Directory of each named source. Defaults `/data/canon`, `/data/owner`, `/data/friend`. Each holds an `img` folder with the extracted tree (`<root>/img/String/Consume.img`). Mount them read-only. |
 | `WZIMG_ALLOWED_ROOT` | Same meaning as for the editors: when set, every resolved file must also be inside it. |
 
 Endpoints (GET only; any other method gets 405 `method_not_allowed`, an unknown route 404 `not_found`):
 
-- `/v1/health` returns `{ "status": "ok", "version": "1.0.0", "sources": { "canon": true, "owner": true, "friend": true } }`; each flag says the root directory exists and is readable.
+- `/v1/health` returns `{ "status": "ok", "version": "1.0.0", "sources": { "canon": true, "owner": true, "friend": true } }`; each flag says the `img` folder under that root exists and is readable. Health needs the token but does not count against the 4-request cap.
 - `/v1/resolve?source=owner&path=String/Consume.img` returns `{ "source", "path", "exists": true, "sizeBytes" }`. It only tests the path resolver; the file is not opened.
 
 Errors are JSON, `{ "error": { "code": "...", "message": "..." } }`: `unauthorized` 401, `bad_path` 400, `unknown_source` 400, `bad_request` 400
@@ -191,7 +191,7 @@ Errors are JSON, `{ "error": { "code": "...", "message": "..." } }`: `unauthoriz
 
 Safety notes:
 
-- A path is accepted only when it consists of ASCII letters, digits, space, `_`, `-` and `.`, joined by `/`; it ends with `.img`, is at most 260 characters, has no empty segment, no segment that starts with `.` (so no `..`), no backslash, no `%`, and does not start with `Backups` (any case). Names are case-sensitive and never lower-cased.
+- A path is accepted only when it consists of ASCII letters, digits, space, `_`, `-` and `.`, joined by `/`; it ends with `.img`, is at most 260 characters, has no empty segment, no segment that starts with `.` (so no `..`), no backslash, no `%`, and has no segment named `Backups` (any case). Names are case-sensitive and never lower-cased.
 - The file is looked up under `<root>/img`. It must be a regular file, and neither the file nor any folder between `img` and the file may be a symbolic link. The resolved path is checked against the `img` folder again, and against `WZIMG_ALLOWED_ROOT`.
 - At most 4 requests run at the same time (the next gets 503), a request is cut off after 30 s, and a request body is refused.
 - The log has one line per request: method, route template, status, duration. Never the query string, a header or the token.

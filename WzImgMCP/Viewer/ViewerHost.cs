@@ -39,6 +39,9 @@ public static class ViewerHost
             return 2;
         }
 
+        if (options.Warning != null)
+            Console.Error.WriteLine("viewer: warning: " + options.Warning);
+
         var app = Build(args, options, $"http://{HostUrl.ForUrl(host)}:{port}");
 
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("WzImgMCP.Viewer");
@@ -80,7 +83,7 @@ public static class ViewerHost
 
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(resolver ?? new ViewerPathResolver(options.Roots));
-        builder.Services.AddSingleton(new SemaphoreSlim(options.MaxConcurrentRequests, options.MaxConcurrentRequests));
+        builder.Services.AddSingleton(new ViewerRequestLimiter(options.MaxConcurrentRequests));
         return builder;
     }
 
@@ -88,7 +91,7 @@ public static class ViewerHost
     public static void Configure(WebApplication app, ViewerOptions options)
     {
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("WzImgMCP.Viewer");
-        var slots = app.Services.GetRequiredService<SemaphoreSlim>();
+        var limiter = app.Services.GetRequiredService<ViewerRequestLimiter>();
         var tokenDigest = SHA256.HashData(Encoding.UTF8.GetBytes(options.Token));
 
         // Outermost: log one line per request (method, route template, status, time) and turn any unhandled
@@ -144,7 +147,9 @@ public static class ViewerHost
         // Concurrency cap and request timeout.
         app.Use(async (context, next) =>
         {
-            if (!await slots.WaitAsync(0))
+            // Health is cheap and is what a container health check calls: it must still answer while every slot is busy.
+            bool takesSlot = context.GetEndpoint()?.Metadata.GetMetadata<NoRequestSlot>() == null;
+            if (takesSlot && !limiter.TryEnter())
             {
                 context.Response.Headers.RetryAfter = "1";
                 await WriteError(context, 503, "busy", "too many requests in progress; retry shortly");
@@ -170,7 +175,8 @@ public static class ViewerHost
             finally
             {
                 context.RequestAborted = clientAborted;
-                slots.Release();
+                if (takesSlot)
+                    limiter.Exit();
             }
         });
 
@@ -178,8 +184,8 @@ public static class ViewerHost
         {
             status = "ok",
             version = typeof(ViewerHost).Assembly.GetName().Version?.ToString(3) ?? "unknown",
-            sources = ViewerOptions.SourceNames.ToDictionary(n => n, n => IsReadableDirectory(o.Roots[n])),
-        }, Json));
+            sources = ViewerOptions.SourceNames.ToDictionary(n => n, n => IsReadableDirectory(Path.Combine(o.Roots[n], "img"))),   // what the resolver reads
+        }, Json)).WithMetadata(new NoRequestSlot());
 
         app.MapGet("/v1/resolve", async (HttpContext context, ViewerPathResolver resolver) =>
         {
@@ -199,6 +205,9 @@ public static class ViewerHost
             }
         });
     }
+
+    /// <summary>Endpoint marker: the request does not count against the concurrency cap (the token is still required).</summary>
+    private sealed class NoRequestSlot { }
 
     /// <summary>Constant time comparison. Both values are hashed first, so the compared arrays always have the same length.</summary>
     private static bool TokenMatches(byte[] expectedDigest, Microsoft.Extensions.Primitives.StringValues supplied)

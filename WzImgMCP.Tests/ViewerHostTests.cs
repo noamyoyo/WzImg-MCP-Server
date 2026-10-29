@@ -208,6 +208,70 @@ public sealed class ViewerHostTests : IAsyncLifetime
             Assert.DoesNotContain(token, text);
     }
 
+    [Theory]
+    [InlineData("abcdefghijklmnopqrstuvwxyz0123 456789")]     // inner space
+    [InlineData("abcdefghijklmnopqrstuvwxyz0123\t456789")]    // inner tab
+    [InlineData("abcdefghijklmnopqrstuvwxyz0123\n456789")]    // inner newline
+    [InlineData("abcdefghijklmnopqrstuvwxyz0123\u0001456789")] // control character
+    [InlineData("abcdefghijklmnopqrstuvwxyz0123\u00E9456789")] // non-ASCII
+    [InlineData("abcdefghijklmnopqrstuvwxyz0123\u05D0456789")] // non-ASCII, Hebrew
+    public async Task Startup_TokenWithForbiddenCharacter_ExitsWithErrorAndNoToken(string token)
+    {
+        Assert.Throws<ViewerConfigException>(() => ViewerOptions.FromEnvironment(Env(token)));
+
+        var previous = Console.Error;
+        var captured = new StringWriter();
+        Console.SetError(captured);
+        int exit;
+        try
+        {
+            exit = await ViewerHost.RunAsync(Array.Empty<string>(), "127.0.0.1", 0, Env(token));
+        }
+        finally
+        {
+            Console.SetError(previous);
+        }
+
+        Assert.Equal(2, exit);
+        Assert.Contains("WZ_VIEWER_TOKEN", captured.ToString());
+        Assert.DoesNotContain("abcdefghijklmnopqrstuvwxyz", captured.ToString());
+    }
+
+    [Fact]
+    public void Options_Token_IsTrimmed_BeforeTheLengthCheck()
+    {
+        var core = "Zq7-" + new string('k', 28);   // 32 characters
+        Assert.Equal(core, ViewerOptions.FromEnvironment(Env("  " + core + "\r\n")).Token);
+        Assert.Throws<ViewerConfigException>(() => ViewerOptions.FromEnvironment(Env("  " + core.Substring(1) + "\n")));   // 31 after trimming
+        Assert.Throws<ViewerConfigException>(() => ViewerOptions.FromEnvironment(Env("   \n")));
+    }
+
+    [Fact]
+    public async Task Options_TrimmedToken_IsWhatTheHeaderMustCarry()
+    {
+        var core = "Zq7-" + new string('k', 28);
+        var roots = ViewerOptions.SourceNames.ToDictionary(n => n, n => Path.Combine(_tmp, n));
+        var options = ViewerOptions.FromEnvironment(name => name == ViewerOptions.TokenEnvVar ? core + "\n" : roots.GetValueOrDefault(name.Replace("WZ_VIEWER_ROOT_", "").ToLowerInvariant()));
+        var s = await Start(options);
+        Assert.Equal(HttpStatusCode.OK, (await s.Get("/v1/health", core)).StatusCode);
+    }
+
+    [Fact]
+    public void Options_WeakToken_GivesWarningWithoutTheToken()
+    {
+        var weak = ViewerOptions.FromEnvironment(Env(new string('a', 40)));
+        Assert.NotNull(weak.Warning);
+        Assert.Contains("WZ_VIEWER_TOKEN", weak.Warning);
+        Assert.DoesNotContain("aaaa", weak.Warning);
+
+        var sevenDistinct = ViewerOptions.FromEnvironment(Env("abcdefg" + new string('a', 30)));
+        Assert.NotNull(sevenDistinct.Warning);
+
+        var fine = ViewerOptions.FromEnvironment(Env("abcdefgh" + new string('a', 30)));   // 8 distinct characters
+        Assert.Null(fine.Warning);
+        Assert.Null(ViewerOptions.FromEnvironment(Env(Token)).Warning);
+    }
+
     [Fact]
     public void Options_Token_Of32Characters_IsAccepted()
     {
@@ -259,6 +323,19 @@ public sealed class ViewerHostTests : IAsyncLifetime
         Assert.False(sources.GetProperty("canon").GetBoolean());
         Assert.True(sources.GetProperty("owner").GetBoolean());
         Assert.False(sources.GetProperty("friend").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Health_RootWithoutImgFolder_IsFalse()
+    {
+        Directory.Delete(Path.Combine(_tmp, "canon", "img"), recursive: true);   // the root exists, what the resolver reads does not
+
+        var s = await Start();
+        using var doc = JsonDocument.Parse(await (await s.Get("/v1/health")).Content.ReadAsStringAsync());
+        var sources = doc.RootElement.GetProperty("sources");
+        Assert.False(sources.GetProperty("canon").GetBoolean());
+        Assert.True(sources.GetProperty("owner").GetBoolean());
+        Assert.True(sources.GetProperty("friend").GetBoolean());
     }
 
     // ---- /v1/resolve
@@ -358,19 +435,28 @@ public sealed class ViewerHostTests : IAsyncLifetime
 
     // ---- no MCP, no write path
 
+    // A POST or DELETE gets 405 from the viewer's own method check whether or not a route exists, so such a request
+    // proves nothing about MCP. What proves it: GET on the MCP paths is a plain 404 (a mapped MCP route would answer
+    // otherwise), the endpoint list below holds only /v1/ routes, and the service graph has no MCP type.
     [Theory]
-    [InlineData("POST", "/")]
-    [InlineData("POST", "/sse")]
-    [InlineData("POST", "/message")]
-    [InlineData("GET", "/")]
-    [InlineData("GET", "/sse")]
-    [InlineData("GET", "/message")]
-    [InlineData("DELETE", "/")]
-    public async Task NoMcpEndpoint(string method, string url)
+    [InlineData("/")]
+    [InlineData("/sse")]
+    [InlineData("/message")]
+    public async Task NoMcpEndpoint_GetOnMcpPaths_Is404(string url)
     {
         var s = await Start();
-        var response = await s.Send(new HttpMethod(method), url);
-        Assert.True(response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed, $"{method} {url} gave {(int)response.StatusCode}");
+        await AssertError(await s.Get(url), HttpStatusCode.NotFound, "not_found");
+    }
+
+    [Fact]
+    public async Task OnlyTheExpectedRoutesExist()
+    {
+        var s = await Start();
+        var routes = s.App.Services.GetRequiredService<EndpointDataSource>().Endpoints
+            .Select(e => ((RouteEndpoint)e).RoutePattern.RawText)
+            .OrderBy(r => r, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(new[] { "/v1/health", "/v1/resolve" }, routes);
     }
 
     [Fact]
@@ -420,7 +506,7 @@ public sealed class ViewerHostTests : IAsyncLifetime
         for (int i = 0; i < 4; i++)
             Assert.True(await resolver.Entered.WaitAsync(TimeSpan.FromSeconds(30)), "request did not arrive");
 
-        var busy = await s.Get("/v1/health");
+        var busy = await s.Get(url);
         await AssertError(busy, HttpStatusCode.ServiceUnavailable, "busy");
         Assert.True(busy.Headers.Contains("Retry-After"));
 
@@ -429,7 +515,34 @@ public sealed class ViewerHostTests : IAsyncLifetime
             Assert.Equal(HttpStatusCode.OK, (await task).StatusCode);
 
         // the slots are free again
+        Assert.Equal(HttpStatusCode.OK, (await s.Get(url)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Health_AnswersWhileAllSlotsAreHeld_ButStillNeedsTheToken()
+    {
+        var options = Options();
+        var resolver = new GatedResolver(options.Roots);
+        var s = await Start(options, resolver);
+
+        var inFlight = Enumerable.Range(0, 4).Select(_ => s.Get("/v1/resolve?source=owner&path=String/Consume.img")).ToList();
+        for (int i = 0; i < 4; i++)
+            Assert.True(await resolver.Entered.WaitAsync(TimeSpan.FromSeconds(30)), "request did not arrive");
+
+        await AssertError(await s.Get("/v1/resolve?source=owner&path=String/Consume.img"), HttpStatusCode.ServiceUnavailable, "busy");
         Assert.Equal(HttpStatusCode.OK, (await s.Get("/v1/health")).StatusCode);
+        await AssertError(await s.Get("/v1/health", noToken: true), HttpStatusCode.Unauthorized, "unauthorized");
+
+        resolver.Gate.SetResult();
+        await Task.WhenAll(inFlight);
+    }
+
+    [Fact]
+    public void Limiter_IsItsOwnServiceType_NotABareSemaphore()
+    {
+        var builder = ViewerHost.CreateBuilder(Array.Empty<string>(), Options(), "http://127.0.0.1:0", null);
+        Assert.Contains(builder.Services, d => d.ServiceType == typeof(ViewerRequestLimiter));
+        Assert.DoesNotContain(builder.Services, d => d.ServiceType == typeof(SemaphoreSlim));
     }
 
     [Fact]
