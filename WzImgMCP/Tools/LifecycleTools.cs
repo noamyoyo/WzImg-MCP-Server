@@ -23,7 +23,7 @@ public class LifecycleTools
         [Description("Category name")] string category,
         [Description("Image name")] string image)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ParseResult { Success = false, Error = "No data source initialized" };
         }
@@ -50,7 +50,7 @@ public class LifecycleTools
         [Description("Category name")] string category,
         [Description("Image name")] string image)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new UnparseResult { Success = false, Error = "No data source initialized" };
         }
@@ -76,7 +76,7 @@ public class LifecycleTools
         [Description("Category name")] string category,
         [Description("Image name")] string image)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new IsParsedResult { Success = false, Error = "No data source initialized" };
         }
@@ -101,7 +101,7 @@ public class LifecycleTools
     [McpServerTool(Name = "get_parsed_images"), Description("List all currently parsed images")]
     public string GetParsedImages()
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ParsedImagesResult { Success = false, Error = "No data source initialized" };
         }
@@ -127,7 +127,7 @@ public class LifecycleTools
         [Description("Category name")] string category,
         [Description("Preload even when the category holds more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new PreloadResult { Success = false, Error = "No data source initialized" };
         }
@@ -196,7 +196,7 @@ public class LifecycleTools
     public string UnloadCategory(
         [Description("Category name")] string category)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new UnloadResult { Success = false, Error = "No data source initialized" };
         }

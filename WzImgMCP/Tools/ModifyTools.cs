@@ -31,7 +31,7 @@ public class ModifyTools
         [Description("Property path")] string path,
         [Description("New string value")] string value)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ModifyResult { Success = false, Error = "No data source initialized" };
         }
@@ -72,7 +72,7 @@ public class ModifyTools
         [Description("Property path")] string path,
         [Description("New integer value")] int value)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ModifyResult { Success = false, Error = "No data source initialized" };
         }
@@ -125,7 +125,7 @@ public class ModifyTools
         [Description("Property path")] string path,
         [Description("New float value")] float value)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ModifyResult { Success = false, Error = "No data source initialized" };
         }
@@ -175,7 +175,7 @@ public class ModifyTools
         [Description("X value")] int x,
         [Description("Y value")] int y)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ModifyResult { Success = false, Error = "No data source initialized" };
         }
@@ -219,7 +219,7 @@ public class ModifyTools
         [Description("Property type (String, Int, Short, Long, Float, Double, Vector, SubProperty, Null)")] string type,
         [Description("Initial value (optional, depends on type)")] string? value = null)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new AddPropertyResult { Success = false, Error = "No data source initialized" };
         }
@@ -283,7 +283,7 @@ public class ModifyTools
         [Description("Image name")] string image,
         [Description("Property path to delete")] string path)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new DeleteResult { Success = false, Error = "No data source initialized" };
         }
@@ -328,7 +328,7 @@ public class ModifyTools
         [Description("Property path")] string path,
         [Description("New name")] string newName)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new RenameResult { Success = false, Error = "No data source initialized" };
         }
@@ -373,7 +373,7 @@ public class ModifyTools
         [Description("Destination parent path")] string destParentPath,
         [Description("New property name (optional, uses source name if not specified)")] string? newName = null)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new CopyResult { Success = false, Error = "No data source initialized" };
         }
@@ -445,7 +445,7 @@ public class ModifyTools
         [Description("Path of a PNG file inside the allowed root (give this or base64Png)")] string? pngPath = null,
         [Description("Optional WZ pixel format: bgra8888 (exact), bgra4444, bgra5551, bgr565, dxt3, dxt5, or auto (= lossless bgra8888, never DXT). Default: the canvas keeps its current format")] string? format = null)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ModifyResult { Success = false, Error = "No data source initialized" };
         }
@@ -501,7 +501,7 @@ public class ModifyTools
         [Description("X origin")] int x,
         [Description("Y origin")] int y)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ModifyResult { Success = false, Error = "No data source initialized" };
         }
@@ -563,7 +563,7 @@ public class ModifyTools
         [Description("Path of a PNG file inside the allowed root (give this or base64Png)")] string? pngPath = null,
         [Description("Optional WZ pixel format: bgra8888 (exact, default), bgra4444, bgra5551, bgr565, dxt3, dxt5, or auto (= lossless bgra8888, never DXT). Lossy formats only when named here")] string? format = null)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ImportResult { Success = false, Error = "No data source initialized" };
         }
@@ -629,7 +629,7 @@ public class ModifyTools
         [Description("Name for the new sound")] string name,
         [Description("Base64 encoded MP3 data")] string base64Audio)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ImportResult { Success = false, Error = "No data source initialized" };
         }
@@ -691,7 +691,7 @@ public class ModifyTools
         [Description("Category name")] string category,
         [Description("Image name")] string image)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new SaveResult { Success = false, Error = "No data source initialized" };
         }
@@ -734,7 +734,7 @@ public class ModifyTools
         [Description("Category name")] string category,
         [Description("Image name")] string image)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new DiscardResult { Success = false, Error = "No data source initialized" };
         }

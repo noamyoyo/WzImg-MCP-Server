@@ -26,7 +26,7 @@ public class AudioTools
         [Description("Image name")] string image,
         [Description("Property path to the sound")] string path)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new SoundInfoResult { Success = false, Error = "No data source initialized" };
         }
@@ -62,7 +62,7 @@ public class AudioTools
         [Description("Image name")] string image,
         [Description("Property path to the sound")] string path)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new SoundDataResult { Success = false, Error = "No data source initialized" };
         }
@@ -107,7 +107,7 @@ public class AudioTools
         [Description("Image name")] string image,
         [Description("Maximum depth to search")] int maxDepth = 10)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new SoundListResult { Success = false, Error = "No data source initialized" };
         }
@@ -140,7 +140,7 @@ public class AudioTools
         [Description("Image name")] string image,
         [Description("Property path to the UOL or sound")] string path)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ResolveSoundResult { Success = false, Error = "No data source initialized" };
         }

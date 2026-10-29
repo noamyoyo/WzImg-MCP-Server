@@ -21,9 +21,9 @@ public abstract class ToolBase
     /// <summary>
     /// Executes an action with session validation and exception handling
     /// </summary>
-    protected Result<T> Execute<T>(Func<T> action)
+    protected Result<T> Execute<T>(Func<T> action, bool countsAsActivity = true)
     {
-        if (!Session.IsInitialized)
+        if (!(countsAsActivity ? Session.BeginToolCall() : Session.IsInitialized))
             return Result<T>.Fail("No data source initialized. Call init_data_source first.");
 
         try
@@ -41,6 +41,7 @@ public abstract class ToolBase
     /// </summary>
     protected Result<T> ExecuteRaw<T>(Func<T> action)
     {
+        Session.Touch();
         try
         {
             return Result<T>.Ok(action());
@@ -60,7 +61,7 @@ public abstract class ToolBase
     /// </summary>
     protected T Run<T>(Func<T> action, Func<T> createError, Func<Exception, T> createException) where T : class
     {
-        if (!Session.IsInitialized)
+        if (!Session.BeginToolCall())
             return createError();
 
         try
@@ -78,6 +79,7 @@ public abstract class ToolBase
     /// </summary>
     protected T RunRaw<T>(Func<T> action, Func<Exception, T> createException) where T : class
     {
+        Session.Touch();
         try
         {
             return action();
@@ -135,7 +137,7 @@ public abstract class ToolBase
     /// <summary>
     /// Returns true if session is initialized
     /// </summary>
-    protected bool IsInitialized => Session.IsInitialized;
+    protected bool IsInitialized => Session.BeginToolCall();
 
     /// <summary>
     /// Standard error message for uninitialized session

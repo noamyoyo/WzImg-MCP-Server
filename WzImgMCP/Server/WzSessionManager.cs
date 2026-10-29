@@ -49,8 +49,19 @@ public class WzSessionManager : IDisposable
     /// <summary>Starts the memory guard's timer; <paramref name="log"/> gets one line per trim. Called once at startup.</summary>
     public void StartMemoryGuard(Action<string> log) => _guard.Start(log);
 
-    /// <summary>Records a tool call (the idle trim waits for a quiet period after the last one).</summary>
+    /// <summary>
+    /// Records a tool call (the idle trim waits for a quiet period after the last one). Only the start of a real tool call and the
+    /// steps of a long scan or bulk call do this: reading the data source or <see cref="IsInitialized"/> does not, and neither does
+    /// get_cache_stats, so a monitoring loop cannot keep the server from ever trimming when it is idle.
+    /// </summary>
     public void Touch() => _guard.Touch();
+
+    /// <summary>The first thing a tool does: records the call as activity and tells whether a data source is open (opening the default folder if need be).</summary>
+    public bool BeginToolCall()
+    {
+        Touch();
+        return IsInitialized;
+    }
 
     /// <summary>Limits of scans and bulk tools (WZIMG_SCAN_MAX_IMAGES and the others). Replaceable for tests.</summary>
     public ScanLimits ScanLimits
@@ -91,11 +102,7 @@ public class WzSessionManager : IDisposable
     /// </summary>
     public bool IsInitialized
     {
-        get
-        {
-            _guard.Touch();
-            return _dataSource?.IsInitialized == true || TryAutoInit();
-        }
+        get => _dataSource?.IsInitialized == true || TryAutoInit();
     }
 
     /// <summary>
@@ -105,7 +112,6 @@ public class WzSessionManager : IDisposable
     {
         get
         {
-            _guard.Touch();
             if (_dataSource == null) TryAutoInit();
             return _dataSource
                 ?? throw new InvalidOperationException("Data source not initialized. Call init_data_source first.");

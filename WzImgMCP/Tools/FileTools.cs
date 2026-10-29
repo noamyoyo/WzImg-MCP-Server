@@ -175,7 +175,7 @@ public class FileTools : ToolBase
                 LastTrimReason = trim?.Reason,
                 LastTrimReleasedImages = trim?.ReleasedImages
             };
-        });
+        }, countsAsActivity: false);   // a monitoring loop must not count as activity (the idle trim would never run)
     }
 
     [McpServerTool(Name = "clear_cache"), Description("Clear the loaded image cache")]

@@ -33,6 +33,7 @@ public class BatchTools
         [Description("Display name for the extracted IMG filesystem manifest")] string? displayName = null,
         [Description("Resolve _inlink/_outlink canvas references during extraction")] bool resolveLinks = false)
     {
+        _session.Touch();   // a real tool call, although it needs no open data source
         try
         {
             wzPath = PathGuard.Resolve(wzPath);
@@ -115,6 +116,7 @@ public class BatchTools
         [Description("Save as 64-bit WZ format")] bool saveAs64Bit = false,
         [Description("Separate canvas data for 64-bit WZ format")] bool separateCanvas = false)
     {
+        _session.Touch();   // a real tool call, although it needs no open data source
         try
         {
             imgPath = PathGuard.Resolve(imgPath);
@@ -202,7 +204,7 @@ public class BatchTools
         [Description("Maximum images to export")] int maxImages = 1000,
         [Description("Export even when the categories hold more images than WZIMG_BULK_MAX_IMAGES (default: false)")] bool force = false)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new BatchExportImagesResult { Success = false, Error = "No data source initialized" };
         }
@@ -305,7 +307,7 @@ public class BatchTools
         [Description("Search type: name, value, or both")] string searchType = "name",
         [Description("Maximum results (default: 30)")] int maxResults = 30)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new BatchSearchResult { Success = false, Error = "No data source initialized" };
         }

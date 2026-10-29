@@ -29,7 +29,7 @@ public class ExportTools
         [Description("Maximum depth to export (default: 5, max: 10)")] int maxDepth = 5,
         [Description("Output file path (REQUIRED for exports > 100KB)")] string? outputPath = null)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ExportMarkdownResult { Success = false, Error = "No data source initialized" };
         }
@@ -121,7 +121,7 @@ public class ExportTools
         [Description("Property path to the canvas")] string path,
         [Description("Output file path")] string outputPath)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ExportPngResult { Success = false, Error = "No data source initialized" };
         }
@@ -173,7 +173,7 @@ public class ExportTools
         [Description("Property path to the sound")] string path,
         [Description("Output file path")] string outputPath)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ExportMp3Result { Success = false, Error = "No data source initialized" };
         }
@@ -226,7 +226,7 @@ public class ExportTools
         [Description("Property path (empty for entire image)")] string? path = null,
         [Description("Maximum depth to search")] int maxDepth = 10)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new BatchExportResult { Success = false, Error = "No data source initialized" };
         }
@@ -285,7 +285,7 @@ public class ExportTools
         [Description("Property path (empty for entire image)")] string? path = null,
         [Description("Maximum depth to search")] int maxDepth = 10)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new BatchExportResult { Success = false, Error = "No data source initialized" };
         }

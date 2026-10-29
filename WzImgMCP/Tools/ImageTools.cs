@@ -290,7 +290,7 @@ public class ImageTools : ToolBase
         [Description("Property path to the canvas")] string path,
         [Description("Largest allowed width or height in pixels, 1-2048 (default 2048). Larger images are scaled down.")] int maxSize = CanvasImaging.MaxViewDimension)
     {
-        if (!Session.IsInitialized)
+        if (!Session.BeginToolCall())
             return TextResponse("Error: No data source initialized. Call init_data_source first.", isError: true);
 
         try

@@ -95,6 +95,9 @@ public sealed class MemoryGuard : IDisposable
     /// </summary>
     public bool IsOverSoftLimit() => _settings.SoftLimitBytes > 0 && Interlocked.Read(ref _heapReading) > _settings.SoftLimitBytes;
 
+    /// <summary>How long ago the last tool call happened (what the idle trim compares with its limit).</summary>
+    public TimeSpan QuietFor => _time.GetElapsedTime(Volatile.Read(ref _lastActivity), _time.GetTimestamp());
+
     /// <summary>A tool call happened: the quiet period starts again.</summary>
     public void Touch()
     {

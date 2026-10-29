@@ -24,7 +24,7 @@ public class AnalysisTools
     [McpServerTool(Name = "get_statistics"), Description("Get overall statistics for the data source")]
     public string GetStatistics()
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new StatisticsResult { Success = false, Error = "No data source initialized" };
         }
@@ -83,7 +83,7 @@ public class AnalysisTools
         [Description("Maximum images to list (default: 200, max: 1000)")] int limit = Paging.DefaultLimit,
         [Description("Number of images to skip (default: 0)")] int offset = 0)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new CategorySummaryResult { Success = false, Error = "No data source initialized" };
         }
@@ -169,7 +169,7 @@ public class AnalysisTools
         [Description("Path of one image inside the category, as list_images_in_category shows it; checks only that image, whatever the size of the category")] string? image = null,
         [Description("Maximum results to return (default: 30)")] int maxResults = 30)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new BrokenUolsResult { Success = false, Error = "No data source initialized" };
         }
@@ -212,7 +212,7 @@ public class AnalysisTools
         [Description("Second path")] string path2,
         [Description("Maximum depth to compare")] int maxDepth = 5)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new CompareResult { Success = false, Error = "No data source initialized" };
         }
@@ -255,7 +255,7 @@ public class AnalysisTools
     [McpServerTool(Name = "get_version_info"), Description("Get version information for the current data source")]
     public string GetVersionInfo()
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new VersionInfoResult { Success = false, Error = "No data source initialized" };
         }
@@ -288,7 +288,7 @@ public class AnalysisTools
         [Description("Category name")] string category,
         [Description("Image name")] string image)
     {
-        if (!_session.IsInitialized)
+        if (!_session.BeginToolCall())
         {
             return new ValidationResult { Success = false, Error = "No data source initialized" };
         }
