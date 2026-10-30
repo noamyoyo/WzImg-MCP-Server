@@ -20,6 +20,7 @@ public sealed class PackerHostTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         Environment.SetEnvironmentVariable(PathGuard.EnvVar, null);
+        _fx.BuildPublished();
         _fx.Populate("owner");
         _server = await PackerTestServer.StartAsync(_fx.Options());
     }
@@ -43,9 +44,9 @@ public sealed class PackerHostTests : IAsyncLifetime
     private static async Task AssertError(HttpResponseMessage response, HttpStatusCode status, string code)
     {
         var text = await response.Content.ReadAsStringAsync();
-        Assert.Equal(status, response.StatusCode);
+        Assert.True(status == response.StatusCode, text);
         using var doc = JsonDocument.Parse(text);
-        Assert.Equal(code, doc.RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.True(code == doc.RootElement.GetProperty("error").GetProperty("code").GetString(), text);
         Assert.False(string.IsNullOrEmpty(doc.RootElement.GetProperty("error").GetProperty("message").GetString()));
         Assert.StartsWith("application/json", response.Content.Headers.ContentType?.ToString());
     }
@@ -184,7 +185,7 @@ public sealed class PackerHostTests : IAsyncLifetime
     // ---- health
 
     [Fact]
-    public async Task Health_ReportsSourcesAndOutbox_WithoutAnyPath()
+    public async Task Health_ReportsSourcesOutboxAndPublishedFolder_WithoutAnyPath()
     {
         var response = await Send(HttpMethod.Get, "/v1/health");
         var text = await response.Content.ReadAsStringAsync();
@@ -194,12 +195,18 @@ public sealed class PackerHostTests : IAsyncLifetime
         Assert.Equal("ok", root.GetProperty("status").GetString());
         Assert.True(root.GetProperty("sources").GetProperty("owner").GetBoolean());
         Assert.True(root.GetProperty("outbox").GetBoolean());
+        Assert.True(root.GetProperty("published").GetBoolean());
         Assert.False(root.GetProperty("busy").GetBoolean());
         Assert.DoesNotContain(_fx.Temp, text);
         Assert.Null(response.Headers.Server.FirstOrDefault());
     }
 
     // ---- bodies
+
+    private const string OneFile = """[{"img":"String/Pet.img","from":"owner","op":"set"}]""";
+
+    private static string PackJson(string category = "\"String\"", string files = OneFile, string version = "83", string key = "\"GMS\"", string extra = "")
+        => $$"""{"category":{{category}},"files":{{files}},"wzVersion":{{version}},"key":{{key}}{{extra}}}""";
 
     [Fact]
     public async Task PackBody_Problems_AreTypedErrors()
@@ -208,32 +215,48 @@ public sealed class PackerHostTests : IAsyncLifetime
         await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: "not json"), HttpStatusCode.BadRequest, "bad_request");
         await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: "null"), HttpStatusCode.BadRequest, "bad_request");
         await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: "[1,2]"), HttpStatusCode.BadRequest, "bad_request");
-        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: """{"person":"owner","category":"String","wzVersion":83,"key":"GMS","extra":1}"""), HttpStatusCode.BadRequest, "bad_request");
-        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: """{"Person":"owner","category":"String","wzVersion":83,"key":"GMS"}"""), HttpStatusCode.BadRequest, "bad_request");   // names are case sensitive
-        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: """{"person":"owner","category":"String","wzVersion":"83","key":"GMS"}"""), HttpStatusCode.BadRequest, "bad_request");
-        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: """{"person":"owner","category":"String","wzVersion":83,"key":"GMS"}""", contentType: "text/plain"), HttpStatusCode.UnsupportedMediaType, "unsupported_media_type");
-        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: "{\"pad\":\"" + new string('x', 5000) + "\"}"), HttpStatusCode.RequestEntityTooLarge, "too_large");
+        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: PackJson(extra: ",\"extra\":1")), HttpStatusCode.BadRequest, "bad_request");
+        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: PackJson(extra: ",\"person\":\"owner\"")), HttpStatusCode.BadRequest, "bad_request");   // the phase A field is gone
+        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: PackJson().Replace("\"category\"", "\"Category\"")), HttpStatusCode.BadRequest, "bad_request");   // names are case sensitive
+        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: PackJson(version: "\"83\"")), HttpStatusCode.BadRequest, "bad_request");
+        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: PackJson(), contentType: "text/plain"), HttpStatusCode.UnsupportedMediaType, "unsupported_media_type");
+        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: "{\"pad\":\"" + new string('x', 4 * 1024 * 1024 + 600) + "\"}"), HttpStatusCode.RequestEntityTooLarge, "too_large");
     }
 
     [Theory]
-    [InlineData("""{"person":"stranger","category":"String","wzVersion":83,"key":"GMS"}""", "unknown_source")]
-    [InlineData("""{"person":"canon","category":"String","wzVersion":83,"key":"GMS"}""", "unknown_source")]
-    [InlineData("""{"category":"String","wzVersion":83,"key":"GMS"}""", "unknown_source")]
-    [InlineData("""{"person":"owner","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"../friend","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"a/b","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"a\\b","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"..","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":".hidden","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"/etc","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"Strïng","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"Backups","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"backups","wzVersion":83,"key":"GMS"}""", "bad_category")]
-    [InlineData("""{"person":"owner","category":"String","wzVersion":64,"key":"GMS"}""", "bad_request")]
-    [InlineData("""{"person":"owner","category":"String","key":"GMS"}""", "bad_request")]
-    [InlineData("""{"person":"owner","category":"String","wzVersion":83,"key":"BMS"}""", "bad_request")]
-    [InlineData("""{"person":"owner","category":"String","wzVersion":83}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"key":"GMS"}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":64,"key":"GMS"}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"BMS"}""", "bad_request")]
+    [InlineData("""{"files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":"","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":"../friend","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":"a/b","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":"..","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":".hidden","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":"/etc","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":"Strïng","files":[{"img":"String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":"Backups","files":[{"img":"Backups/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_category")]
+    [InlineData("""{"category":"String","wzVersion":83,"key":"GMS"}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[],"wzVersion":83,"key":"GMS"}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[null],"wzVersion":83,"key":"GMS"}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"stranger","op":"set"}],"wzVersion":83,"key":"GMS"}""", "unknown_source")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"canon","op":"set"}],"wzVersion":83,"key":"GMS"}""", "unknown_source")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","op":"set"}],"wzVersion":83,"key":"GMS"}""", "unknown_source")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"owner","op":"merge"}],"wzVersion":83,"key":"GMS"}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"owner"}],"wzVersion":83,"key":"GMS"}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[{"from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"owner","op":"set","x":1}],"wzVersion":83,"key":"GMS"}""", "bad_request")]
+    [InlineData("""{"category":"String","files":[{"img":"Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"Item/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"String/../Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"/String/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"String\\Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.txt","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"String/.hidden/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Backups/Pet.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pët.img","from":"owner","op":"set"}],"wzVersion":83,"key":"GMS"}""", "bad_path")]
+    [InlineData("""{"category":"String","files":[{"img":"String/Pet.img","from":"owner","op":"set"},{"img":"String/Pet.img","from":"friend","op":"remove"}],"wzVersion":83,"key":"GMS"}""", "bad_request")]
     public async Task PackRequest_WithABadField_Is400_AndCreatesNothing(string body, string code)
     {
         var before = PackerFixture.Snapshot(_fx.Temp);
@@ -242,13 +265,34 @@ public sealed class PackerHostTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task APackThatListsTooManyFiles_Is400_AndCreatesNothing()
+    {
+        var capped = await PackerTestServer.StartAsync(_fx.Options(o => new PackerOptions(PackerFixture.Token, _fx.Roots, _fx.Outbox, _fx.Published) { TempRoot = _fx.TempRoot, MaxFiles = 2 }));
+        await using var _ = capped;
+        var files = string.Join(',', Enumerable.Range(0, 3).Select(i => $$"""{"img":"String/F{{i}}.img","from":"owner","op":"remove"}"""));
+        var before = PackerFixture.Snapshot(_fx.Temp);
+        var response = await capped.PostRaw("/v1/pack", PackJson(files: "[" + files + "]"));
+        await AssertError(response, HttpStatusCode.BadRequest, "too_many_files");
+        Assert.Equal(before, PackerFixture.Snapshot(_fx.Temp));
+    }
+
+    [Theory]
+    [InlineData("NoSuchCategory", 404, "not_found")]
+    public async Task APackOfACategoryWithNoPublishedFile_Is404(string category, int status, string code)
+    {
+        var body = PackJson(category: $"\"{category}\"", files: $$"""[{"img":"{{category}}/Pet.img","from":"owner","op":"remove"}]""");
+        await AssertError(await Send(HttpMethod.Post, "/v1/pack", body: body), (HttpStatusCode)status, code);
+    }
+
+    [Fact]
     public async Task VerifyBody_Problems_AreTypedErrors()
     {
         await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: "{}"), HttpStatusCode.NotFound, "not_found");
-        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: """{"jobId":"x","person":"owner"}"""), HttpStatusCode.NotFound, "not_found");
-        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: """{"jobId":"../../x","person":"owner"}"""), HttpStatusCode.NotFound, "not_found");
-        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: $$"""{"jobId":"{{new string('a', 32)}}","person":"friend","extra":1}"""), HttpStatusCode.BadRequest, "bad_request");
-        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: $$"""{"jobId":"{{new string('a', 32)}}"}"""), HttpStatusCode.BadRequest, "unknown_source");
+        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: """{"jobId":"x"}"""), HttpStatusCode.NotFound, "not_found");
+        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: """{"jobId":"../../x"}"""), HttpStatusCode.NotFound, "not_found");
+        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: $$"""{"jobId":"{{new string('a', 32)}}","extra":1}"""), HttpStatusCode.BadRequest, "bad_request");
+        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: $$"""{"jobId":"{{new string('a', 32)}}","person":"owner"}"""), HttpStatusCode.BadRequest, "bad_request");   // a verify is about the pack, not a person
+        await AssertError(await Send(HttpMethod.Post, "/v1/verify", body: "{\"pad\":\"" + new string('x', 5000) + "\"}"), HttpStatusCode.RequestEntityTooLarge, "too_large");
     }
 
     [Theory]
@@ -266,14 +310,15 @@ public sealed class PackerHostTests : IAsyncLifetime
     [Fact]
     public async Task AnswersAndLogs_NeverHoldTheTokenOrAPath()
     {
-        var job = await _server.PackAndWait();
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        var job = await _server.PackAndWait(PackerTestServer.Set("String/Pet.img"));
         var id = job.GetProperty("jobId").GetString()!;
         var answers = new List<string>
         {
             job.ToString(),
             (await _server.Verify(id)).Body.ToString(),
             await (await _server.Client.GetAsync("/v1/health")).Content.ReadAsStringAsync(),
-            await (await _server.PostJson("/v1/pack", PackerTestServer.Pack("owner", "NoSuchCategory"))).Content.ReadAsStringAsync(),
+            await (await _server.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Remove("NoSuchCategory/Pet.img") }, "NoSuchCategory"))).Content.ReadAsStringAsync(),
             await (await _server.Client.GetAsync("/v1/nothing")).Content.ReadAsStringAsync(),
         };
         // a bad token must not be echoed either

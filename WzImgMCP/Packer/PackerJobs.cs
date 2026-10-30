@@ -11,14 +11,18 @@ public sealed record PackerWz(string Name, long SizeBytes, string Sha256);
 
 public sealed record PackerError(string Code, string Message);
 
-/// <summary>What <c>GET /v1/jobs/{id}</c> answers, and what is kept in <c>&lt;jobId&gt;/job.json</c>.</summary>
+/// <summary>
+/// What <c>GET /v1/jobs/{id}</c> answers, and what is kept in <c>&lt;jobId&gt;/job.json</c>. <c>Published</c> is the published file the pack
+/// was made from (its sha256 is the "based on" of the pack); <c>Files</c> is the request, with the result of each file once the job is done.
+/// </summary>
 public sealed record PackerJobView(
     string JobId,
     string State,
-    string Person,
     string Category,
     PackerWz? Wz,
+    PackerWz? Published,
     int ImgCount,
+    IReadOnlyList<PackerFileResult> Files,
     IReadOnlyList<string> Warnings,
     PackerError? Error);
 
@@ -30,19 +34,19 @@ public sealed class PackerJob
     private readonly object _gate = new();
     private string _state = Queued;
     private PackerWz? _wz;
-    private int _imgCount;
+    private PackerWz? _published;
+    private IReadOnlyList<PackerFileResult> _files;
     private PackerError? _error;
     private readonly List<string> _warnings = new();
 
     public string Id { get; }
-    public string Person { get; }
     public string Category { get; }
 
-    public PackerJob(string id, string person, string category)
+    public PackerJob(string id, string category, IReadOnlyList<PackerFile> files)
     {
         Id = id;
-        Person = person;
         Category = category;
+        _files = files.Select(f => new PackerFileResult(f.Img, f.From, f.Op, null, null, null)).ToArray();
     }
 
     public bool Finished { get { lock (_gate) return _state is Done or Failed; } }
@@ -53,17 +57,17 @@ public sealed class PackerJob
 
     // The outcome is staged first and published last (see PackerService.RunPack): a job must not read "done" before its
     // record is on disk and before the work slot is free, or a caller that reacts to "done" meets a busy packer.
-    private sealed record Outcome(string State, PackerWz? Wz, int ImgCount, PackerError? Error);
+    private sealed record Outcome(string State, PackerWz? Wz, PackerWz? Published, IReadOnlyList<PackerFileResult>? Files, PackerError? Error);
     private Outcome? _staged;
 
-    public void StageDone(PackerWz wz, int imgCount)
+    public void StageDone(PackerWz wz, PackerWz published, IReadOnlyList<PackerFileResult> files)
     {
-        lock (_gate) _staged = new Outcome(Done, wz, imgCount, null);
+        lock (_gate) _staged = new Outcome(Done, wz, published, files, null);
     }
 
-    public void StageFailed(string code, string message)
+    public void StageFailed(string code, string message, PackerWz? published = null)
     {
-        lock (_gate) _staged = new Outcome(Failed, null, 0, new PackerError(code, message));
+        lock (_gate) _staged = new Outcome(Failed, null, published, null, new PackerError(code, message));
     }
 
     /// <summary>The view the job will have once <see cref="Publish"/> is called (for writing job.json first).</summary>
@@ -71,8 +75,9 @@ public sealed class PackerJob
     {
         lock (_gate)
         {
-            var o = _staged ?? new Outcome(Failed, null, 0, new PackerError("internal_error", "the pack failed unexpectedly"));
-            return new PackerJobView(Id, o.State, Person, Category, o.Wz, o.ImgCount, _warnings.ToArray(), o.Error);
+            var o = _staged ?? new Outcome(Failed, null, null, null, new PackerError("internal_error", "the pack failed unexpectedly"));
+            var files = o.Files ?? _files;
+            return new PackerJobView(Id, o.State, Category, o.Wz, o.Published, files.Count, files, _warnings.ToArray(), o.Error);
         }
     }
 
@@ -81,10 +86,11 @@ public sealed class PackerJob
     {
         lock (_gate)
         {
-            var o = _staged ?? new Outcome(Failed, null, 0, new PackerError("internal_error", "the pack failed unexpectedly"));
+            var o = _staged ?? new Outcome(Failed, null, null, null, new PackerError("internal_error", "the pack failed unexpectedly"));
             _state = o.State;
             _wz = o.Wz;
-            _imgCount = o.ImgCount;
+            _published = o.Published;
+            if (o.Files != null) _files = o.Files;
             _error = o.Error;
         }
     }
@@ -92,7 +98,7 @@ public sealed class PackerJob
     public PackerJobView View()
     {
         lock (_gate)
-            return new PackerJobView(Id, _state, Person, Category, _wz, _imgCount, _warnings.ToArray(), _error);
+            return new PackerJobView(Id, _state, Category, _wz, _published, _files.Count, _files, _warnings.ToArray(), _error);
     }
 }
 
@@ -105,7 +111,7 @@ public sealed class PackerJob
 public sealed class PackerJobStore
 {
     public const string JobFileName = "job.json";
-    private const long MaxJobFileBytes = 256 * 1024;
+    private const long MaxJobFileBytes = 8 * 1024 * 1024;   // a record lists up to PackerOptions.MaxFiles files
     private static readonly Regex IdPattern = new("^[0-9a-f]{32}$", RegexOptions.CultureInvariant);
 
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -131,17 +137,26 @@ public sealed class PackerJobStore
 
     /// <summary>
     /// job.json is written by this process but lives in a folder other processes can write, so what is read back is checked as
-    /// input: a known state and person, a plain category, and a .wz that is exactly <c>&lt;Category&gt;.wz</c> with a size and a hash.
+    /// input: a known state, a plain category, a file list that would have been accepted as a request, and a .wz and a published file
+    /// that are exactly <c>&lt;Category&gt;.wz</c> with a size and a hash.
     /// </summary>
-    internal static bool IsPlausible(PackerJobView v)
+    internal bool IsPlausible(PackerJobView v)
     {
         if (v.State is not (PackerJob.Queued or PackerJob.Running or PackerJob.Done or PackerJob.Failed)) return false;
-        if (!PackerOptions.People.Contains(v.Person)) return false;
         if (!PackerTree.IsCategory(v.Category)) return false;
-        if (v.State == PackerJob.Done && v.Wz == null) return false;
-        if (v.Wz != null)
+        if (!PackerFiles.IsPlausible(v.Category, v.Files, _options.MaxFiles)) return false;
+        if (v.State == PackerJob.Done && (v.Wz == null || v.Published == null)) return false;
+        foreach (var wz in new[] { v.Wz, v.Published })
         {
-            if (v.Wz.Name != v.Category + ".wz" || v.Wz.SizeBytes < 0 || !Sha256Pattern.IsMatch(v.Wz.Sha256 ?? "")) return false;
+            if (wz == null) continue;
+            if (wz.Name != v.Category + ".wz" || wz.SizeBytes < 0 || !Sha256Pattern.IsMatch(wz.Sha256 ?? "")) return false;
+        }
+        foreach (var file in v.Files)
+        {
+            if (file.Sha256 != null && !Sha256Pattern.IsMatch(file.Sha256)) return false;
+            if (file.Result is not (null or PackerFileResult.Replaced or PackerFileResult.Added or PackerFileResult.Removed)) return false;
+            if (v.State == PackerJob.Done && (file.Op == PackerFile.Set) != (file.Sha256 != null)) return false;   // every set carries the hash of its input, a remove none
+            if (v.State == PackerJob.Done && file.Result == null) return false;
         }
         return true;
     }
@@ -149,7 +164,7 @@ public sealed class PackerJobStore
     private static readonly Regex Sha256Pattern = new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
 
     /// <summary>Makes a new job with a fresh random id and its folder in the outbox. Throws 503 <c>outbox_unavailable</c> when the folder cannot be made.</summary>
-    public PackerJob Create(string person, string category)
+    public PackerJob Create(string category, IReadOnlyList<PackerFile> files)
     {
         var id = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
         var dir = JobDirectory(id);
@@ -166,7 +181,7 @@ public sealed class PackerJobStore
             throw new ViewerApiException(503, "outbox_unavailable", "the outbox cannot take a new job");
         }
 
-        var job = new PackerJob(id, person, category);
+        var job = new PackerJob(id, category, files);
         _jobs[id] = job;
         _order.Enqueue(id);
         Persist(job);
@@ -193,7 +208,7 @@ public sealed class PackerJobStore
                 return null;
             if (view.State is PackerJob.Queued or PackerJob.Running)
                 view = view with { State = PackerJob.Failed, Wz = null, Error = new PackerError("interrupted", "the packer stopped before this job finished") };
-            return view with { Warnings = view.Warnings ?? Array.Empty<string>() };
+            return view with { Warnings = view.Warnings ?? Array.Empty<string>(), Files = view.Files ?? Array.Empty<PackerFileResult>() };
         }
         catch (Exception ex) when (ex is ViewerApiException or JsonException or IOException or UnauthorizedAccessException)
         {

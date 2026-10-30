@@ -13,6 +13,7 @@ public sealed class PackerOptionsTests : IDisposable
 
     private Dictionary<string, string> Roots => PackerOptions.SourceNames.ToDictionary(n => n, n => Path.Combine(_temp, n));
     private string Outbox => Path.Combine(_temp, "outbox");
+    private string Published => Path.Combine(_temp, "published");
 
     private Func<string, string?> Env(Dictionary<string, string?>? extra = null)
     {
@@ -23,6 +24,7 @@ public sealed class PackerOptionsTests : IDisposable
             [PackerOptions.RootEnvPrefix + "OWNER"] = Roots["owner"],
             [PackerOptions.RootEnvPrefix + "FRIEND"] = Roots["friend"],
             [PackerOptions.OutboxEnvVar] = Outbox,
+            [PackerOptions.PublishedEnvVar] = Published,
         };
         if (extra != null) foreach (var (k, v) in extra) map[k] = v;
         return name => map.TryGetValue(name, out var v) ? v : null;
@@ -36,9 +38,11 @@ public sealed class PackerOptionsTests : IDisposable
         Assert.Null(o.Warning);
         Assert.Equal(Roots["owner"], o.Roots["owner"]);
         Assert.Equal(Outbox, o.Outbox);
-        Assert.Equal(4096L * 1024 * 1024, o.MaxInputBytes);
+        Assert.Equal(Published, o.PublishedDir);
+        Assert.Equal(Path.Combine(Published, "Item.wz"), o.PublishedFile("Item"));
+        Assert.Equal(512L * 1024 * 1024, o.MaxInputBytes);
         Assert.Equal(1024L * 1024 * 1024, o.MaxWzBytes);
-        Assert.Equal(200_000, o.MaxImages);
+        Assert.Equal(2000, o.MaxFiles);
         Assert.Equal(TimeSpan.FromSeconds(900), o.TimeBudget);
         Assert.Equal(200, o.MaxDiffs);
         Assert.Equal(500, o.MaxJobFolders);
@@ -115,7 +119,9 @@ public sealed class PackerOptionsTests : IDisposable
     [InlineData("WZ_PACKER_MAX_INPUT_MB", "abc")]
     [InlineData("WZ_PACKER_MAX_INPUT_MB", "-1")]
     [InlineData("WZ_PACKER_MAX_WZ_MB", "0")]
-    [InlineData("WZ_PACKER_MAX_IMAGES", "1.5")]
+    [InlineData("WZ_PACKER_MAX_FILES", "1.5")]
+    [InlineData("WZ_PACKER_MAX_FILES", "0")]
+    [InlineData("WZ_PACKER_MAX_FILES", "20001")]
     [InlineData("WZ_PACKER_TIME_BUDGET_SECONDS", "5")]
     [InlineData("WZ_PACKER_TIME_BUDGET_SECONDS", "99999")]
     [InlineData("WZ_PACKER_MAX_DIFFS", "0")]
@@ -133,18 +139,56 @@ public sealed class PackerOptionsTests : IDisposable
     {
         var o = PackerOptions.FromEnvironment(Env(new()
         {
-            ["WZ_PACKER_MAX_REQUESTS"] = "2", ["WZ_PACKER_MAX_INPUT_MB"] = "10", ["WZ_PACKER_MAX_WZ_MB"] = "5", ["WZ_PACKER_MAX_IMAGES"] = "7",
+            ["WZ_PACKER_MAX_REQUESTS"] = "2", ["WZ_PACKER_MAX_INPUT_MB"] = "10", ["WZ_PACKER_MAX_WZ_MB"] = "5", ["WZ_PACKER_MAX_FILES"] = "7",
             ["WZ_PACKER_MAX_IMG_MB"] = "3", ["WZ_PACKER_TIME_BUDGET_SECONDS"] = "60", ["WZ_PACKER_MAX_DIFFS"] = "9", ["WZ_PACKER_MAX_JOB_FOLDERS"] = "11", ["WZ_PACKER_TMP"] = "/dev/shm/",
         }));
         Assert.Equal(2, o.MaxConcurrentRequests);
         Assert.Equal(10L * 1024 * 1024, o.MaxInputBytes);
         Assert.Equal(5L * 1024 * 1024, o.MaxWzBytes);
-        Assert.Equal(7, o.MaxImages);
+        Assert.Equal(7, o.MaxFiles);
         Assert.Equal(3L * 1024 * 1024, o.MaxImageBytes);
         Assert.Equal(TimeSpan.FromSeconds(60), o.TimeBudget);
         Assert.Equal(9, o.MaxDiffs);
         Assert.Equal(11, o.MaxJobFolders);
         Assert.Equal("/dev/shm", o.TempRoot);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    [InlineData("relative/published")]
+    public void PublishedFolder_MustBeSetAndAbsolute(string? published)
+    {
+        var ex = Assert.Throws<PackerConfigException>(() => PackerOptions.FromEnvironment(Env(new() { [PackerOptions.PublishedEnvVar] = published })));
+        Assert.Contains("WZ_PACKER_PUBLISHED_DIR", ex.Message);
+    }
+
+    [Fact]
+    public void PublishedFolder_MustNotOverlapTheOutboxOrARoot()
+    {
+        foreach (var bad in new[] { Outbox, Path.Combine(Outbox, "pub"), Roots["owner"], Path.Combine(Roots["friend"], "pub"), _temp })
+        {
+            var ex = Assert.Throws<PackerConfigException>(() => PackerOptions.FromEnvironment(Env(new() { [PackerOptions.PublishedEnvVar] = bad })));
+            Assert.DoesNotContain(_temp, ex.Message);
+        }
+    }
+
+    [Fact]
+    public void CheckPublished_AcceptsARealFolder_AndRefusesAMissingOneAndALink()
+    {
+        var options = PackerOptions.FromEnvironment(Env());
+        Assert.Throws<PackerConfigException>(options.CheckPublished);   // not created yet
+
+        Directory.CreateDirectory(Published);
+        options.CheckPublished();
+        Directory.Delete(Published);
+
+        var real = Path.Combine(_temp, "real");
+        Directory.CreateDirectory(real);
+        EnvRequire.Capability(ImgFixture.TrySymlink(Published, real, directory: true), "symbolic links cannot be created here");
+        var ex = Assert.Throws<PackerConfigException>(options.CheckPublished);
+        Assert.DoesNotContain(_temp, ex.Message);
     }
 
     [Fact]

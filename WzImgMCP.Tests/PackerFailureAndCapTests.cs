@@ -1,13 +1,13 @@
 #if LINUX_BUILD
 using System.Net;
 using System.Text.Json;
-using Microsoft.Extensions.DependencyInjection;
+using MapleLib.WzLib.WzProperties;
 using WzImgMCP.Packer;
 using WzImgMCP.Utils;
 
 namespace WzImgMCP.Tests;
 
-/// <summary>Damaged and unsafe input, the caps, and one pack at a time. Synthetic data only.</summary>
+/// <summary>Unsafe and missing input, the caps, and one pack at a time. Synthetic data only.</summary>
 [Collection("AllowedRootEnv")]
 public sealed class PackerFailureAndCapTests : IAsyncLifetime
 {
@@ -18,6 +18,7 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
     public Task InitializeAsync()
     {
         Environment.SetEnvironmentVariable(PathGuard.EnvVar, null);
+        _fx.BuildPublished();
         _fx.Populate("owner");
         return Task.CompletedTask;
     }
@@ -37,13 +38,14 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
     }
 
     /// <summary>The same options with some caps changed (the options are immutable after construction, so they are rebuilt).</summary>
-    private PackerOptions Capped(int? maxImages = null, long? maxInput = null, long? maxWz = null, TimeSpan? budget = null)
-        => new(PackerFixture.Token, _fx.Roots, _fx.Outbox)
+    private PackerOptions Capped(int? maxFiles = null, long? maxInput = null, long? maxWz = null, long? maxImage = null, TimeSpan? budget = null)
+        => new(PackerFixture.Token, _fx.Roots, _fx.Outbox, _fx.Published)
         {
             TempRoot = _fx.TempRoot,
-            MaxImages = maxImages ?? PackerOptions.DefaultMaxImages,
+            MaxFiles = maxFiles ?? PackerOptions.DefaultMaxFiles,
             MaxInputBytes = maxInput ?? PackerOptions.DefaultMaxInputMb * 1024L * 1024L,
             MaxWzBytes = maxWz ?? PackerOptions.DefaultMaxWzMb * 1024L * 1024L,
+            MaxImageBytes = maxImage ?? PackerOptions.DefaultMaxImageMb * 1024L * 1024L,
             TimeBudget = budget ?? TimeSpan.FromSeconds(PackerOptions.DefaultTimeBudgetSeconds),
         };
 
@@ -56,6 +58,9 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
 
     private static string Code(JsonElement job) => job.GetProperty("error").GetProperty("code").GetString()!;
 
+    private static async Task<(HttpStatusCode Status, string Code)> Refused(HttpResponseMessage response)
+        => (response.StatusCode, PackerTestServer.ErrorCode(JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement));
+
     private void AssertNothingLeftButTheRecord(JsonElement job)
     {
         var dir = Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!);
@@ -63,179 +68,121 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
         Assert.False(job.TryGetProperty("wz", out _));
     }
 
-    // ---- request-time problems
+    // ---- request-time problems: nothing is made
 
     [Fact]
-    public async Task UnknownCategory_Is404()
+    public async Task ACategoryWithNoPublishedFile_Is404_AndCategoryNamesAreCaseSensitive()
     {
         var s = await Start();
-        var response = await s.PostJson("/v1/pack", PackerTestServer.Pack("owner", "NoSuchCategory"));
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        Assert.Equal("not_found", PackerTestServer.ErrorCode(JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement));
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        foreach (var category in new[] { "NoSuchCategory", "string" })
+        {
+            var response = await s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Remove(category + "/Pet.img") }, category));
+            Assert.Equal((HttpStatusCode.NotFound, "not_found"), await Refused(response));
+        }
         Assert.Empty(Directory.GetFileSystemEntries(_fx.Outbox));   // no job was made
     }
 
     [Fact]
-    public async Task CategoryNameIsCaseSensitive()
+    public async Task ASetWhoseSourceFileIsMissing_Is404_AndAPersonWithoutAnImgFolder_Is503()
     {
         var s = await Start();
-        var response = await s.PostJson("/v1/pack", PackerTestServer.Pack("owner", "string"));
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-    }
+        var response = await s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Set("String/Missing.img") }));
+        Assert.Equal((HttpStatusCode.NotFound, "not_found"), await Refused(response));
 
-    [Fact]
-    public async Task ACategoryTheFriendLacks_Is404_AndAPersonWithoutAnImgFolder_Is503()
-    {
-        var s = await Start();
-        var response = await s.PostJson("/v1/pack", PackerTestServer.Pack("friend"));   // the friend's img folder is empty but there; remove it
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        // the friend's img folder is empty but there: a missing file is a missing file; with no img folder at all the source is unavailable
+        response = await s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Set("String/Pet.img", "friend") }));
+        Assert.Equal((HttpStatusCode.NotFound, "not_found"), await Refused(response));
         Directory.Delete(_fx.Img("friend"));
-        response = await s.PostJson("/v1/pack", PackerTestServer.Pack("friend"));
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-        Assert.Equal("source_unavailable", PackerTestServer.ErrorCode(JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement));
-    }
-
-    [Fact]
-    public async Task ASymbolicLinkAsTheImgFolderOrTheCategoryFolder_Is400()
-    {
-        var s = await Start();
-        var elsewhere = Path.Combine(_fx.Temp, "elsewhere");
-        Directory.CreateDirectory(Path.Combine(elsewhere, "String"));
-        _fx.WriteImg("owner", "String/Pet.img", "x");
-
-        // the category folder is a link
-        var linked = Path.Combine(_fx.Img("friend"), "String");
-        EnvRequire.Capability(ImgFixture.TrySymlink(linked, Path.Combine(elsewhere, "String"), directory: true), "symbolic links cannot be created here");
-        var response = await s.PostJson("/v1/pack", PackerTestServer.Pack("friend"));
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Equal("bad_path", PackerTestServer.ErrorCode(JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement));
-
-        // the img folder is a link
-        Directory.Delete(Path.Combine(_fx.Root("friend"), "img"), true);
-        Assert.True(ImgFixture.TrySymlink(Path.Combine(_fx.Root("friend"), "img"), elsewhere, directory: true));
-        response = await s.PostJson("/v1/pack", PackerTestServer.Pack("friend"));
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        response = await s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Set("String/Pet.img", "friend") }));
+        Assert.Equal((HttpStatusCode.ServiceUnavailable, "source_unavailable"), await Refused(response));
         Assert.Empty(Directory.GetFileSystemEntries(_fx.Outbox));
     }
 
-    // ---- damaged and unsafe input (the job fails, nothing but the record is left)
-
     [Fact]
-    public async Task ADamagedImage_FailsTheJob_WithWarningsAndNoPath_AndLeavesNoWz()
+    public async Task ARemove_NeedsNoSourceFile_EvenWhenThePersonHasNone()
     {
-        File.WriteAllBytes(Path.Combine(_fx.Img("owner"), "String", "Broken.img"), Enumerable.Range(0, 300).Select(i => (byte)(i * 7)).ToArray());
         var s = await Start();
-
-        var job = await s.PackAndWait();
-
-        Assert.Equal("failed", job.GetProperty("state").GetString());
-        Assert.Equal("pack_failed", Code(job));
-        AssertNothingLeftButTheRecord(job);
-        var text = job.ToString();
-        Assert.DoesNotContain(_fx.Temp, text);
-        Assert.DoesNotContain("/tmp", text);
-    }
-
-    [Fact]
-    public async Task ATruncatedImage_FailsTheJob()
-    {
-        var path = _fx.WriteImg("owner", "String/Cut.img", "will be cut");
-        var bytes = File.ReadAllBytes(path);
-        File.WriteAllBytes(path, bytes[..(bytes.Length / 2)]);
-        var s = await Start();
-
-        var job = await s.PackAndWait();
-
-        Assert.Equal("failed", job.GetProperty("state").GetString());
-        AssertNothingLeftButTheRecord(job);
-    }
-
-    [Fact]
-    public async Task AnEmptyCategory_FailsTheJob()
-    {
-        Directory.CreateDirectory(Path.Combine(_fx.Img("owner"), "Empty", "Sub"));
-        var s = await Start();
-        var job = await s.PackAndWait("owner", "Empty");
-        Assert.Equal("empty_category", Code(job));
-        AssertNothingLeftButTheRecord(job);
-    }
-
-    [Fact]
-    public async Task ASymbolicLinkInTheTree_FailsTheJob_AndIsNotFollowed()
-    {
-        var outside = Path.Combine(_fx.Temp, "outside");
-        Directory.CreateDirectory(outside);
-        File.WriteAllBytes(Path.Combine(outside, "Secret.img"), ImgFixture.Bytes(MapleLib.WzLib.WzMapleVersion.BMS));
-        EnvRequire.Capability(ImgFixture.TrySymlink(Path.Combine(_fx.Img("owner"), "String", "Link.img"), Path.Combine(outside, "Secret.img"), directory: false), "symbolic links cannot be created here");
-        var s = await Start();
-
-        var job = await s.PackAndWait();
-
-        Assert.Equal("unsafe_tree", Code(job));
-        AssertNothingLeftButTheRecord(job);
-    }
-
-    [Fact]
-    public async Task ASymbolicLinkToAFolderInTheTree_FailsTheJob()
-    {
-        var outside = Path.Combine(_fx.Temp, "outside-dir");
-        Directory.CreateDirectory(outside);
-        File.WriteAllBytes(Path.Combine(outside, "A.img"), ImgFixture.Bytes(MapleLib.WzLib.WzMapleVersion.BMS));
-        EnvRequire.Capability(ImgFixture.TrySymlink(Path.Combine(_fx.Img("owner"), "String", "Dir"), outside, directory: true), "symbolic links cannot be created here");
-        var s = await Start();
-
-        var job = await s.PackAndWait();
-
-        Assert.Equal("unsafe_tree", Code(job));
-        AssertNothingLeftButTheRecord(job);
-    }
-
-    [Fact]
-    public async Task AFifoInTheTree_FailsTheJob_AndDoesNotHang()
-    {
-        EnvRequire.Capability(ImgFixture.TryMakeFifo(Path.Combine(_fx.Img("owner"), "String", "Pipe.img")), "FIFOs cannot be created here");
-        var s = await Start();
-
-        var job = await s.PackAndWait(seconds: 20);
-
-        Assert.Equal("unsafe_tree", Code(job));
-        AssertNothingLeftButTheRecord(job);
-    }
-
-    [Fact]
-    public async Task AFileThatIsNotAnImg_FailsTheJob()
-    {
-        File.WriteAllText(Path.Combine(_fx.Img("owner"), "String", "notes.txt"), "hello");
-        var s = await Start();
-        var job = await s.PackAndWait();
-        Assert.Equal("unsupported_file", Code(job));
-        AssertNothingLeftButTheRecord(job);
-    }
-
-    [Theory]
-    [InlineData("café.img")]
-    [InlineData("a;b.img")]
-    [InlineData("a%41.img")]
-    public async Task ANameTheViewerRulesRefuse_FailsTheJob(string name)
-    {
-        _fx.WriteImg("owner", "String/" + name, "odd");
-        var s = await Start();
-        var job = await s.PackAndWait();
-        Assert.Equal("unsupported_name", Code(job));
-        AssertNothingLeftButTheRecord(job);
-    }
-
-    [Fact]
-    public async Task TheExtractorsCaseMapAndABackupsFolder_AreIgnored()
-    {
-        File.WriteAllText(Path.Combine(_fx.Img("owner"), "String", ".imgcase.json"), "{\"Entries\":{}}");
-        _fx.WriteImg("owner", "String/Backups/Old.img", "an old copy");
-        var s = await Start();
-
-        var job = await s.PackAndWait();
-
+        Directory.Delete(_fx.Img("friend"));
+        var job = await s.PackAndWait(PackerTestServer.Remove("String/Cash.img", "friend"));
         Assert.Equal("done", job.GetProperty("state").GetString());
-        Assert.Equal(3, job.GetProperty("imgCount").GetInt32());   // Old.img is not counted
+    }
+
+    [Fact]
+    public async Task ASymbolicLinkInThePathOfASource_Is400_AndNothingIsMade()
+    {
+        var s = await Start();
+        var elsewhere = Path.Combine(_fx.Temp, "elsewhere");
+        Directory.CreateDirectory(Path.Combine(elsewhere, "Sub"));
+        File.WriteAllBytes(Path.Combine(elsewhere, "Pet.img"), SyntheticWz.ImgBytes(SyntheticWz.Content("LINKED")));
+        File.WriteAllBytes(Path.Combine(elsewhere, "Sub", "Deep.img"), SyntheticWz.ImgBytes(SyntheticWz.Content("LINKED")));
+        void Link(string link, string target, bool dir) => EnvRequire.Capability(ImgFixture.TrySymlink(link, target, dir), "symbolic links cannot be created here");
+
+        // the file itself, a folder on the way, and the person's img folder
+        Directory.CreateDirectory(Path.Combine(_fx.Img("friend"), "String"));
+        Link(Path.Combine(_fx.Img("friend"), "String", "Pet.img"), Path.Combine(elsewhere, "Pet.img"), false);
+        Link(Path.Combine(_fx.Img("friend"), "String", "Sub"), Path.Combine(elsewhere, "Sub"), true);
+        foreach (var img in new[] { "String/Pet.img", "String/Sub/Deep.img" })
+            Assert.Equal((HttpStatusCode.BadRequest, "bad_path"), await Refused(await s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Set(img, "friend") }))));
+
+        Directory.Delete(Path.Combine(_fx.Root("friend"), "img"), true);
+        Link(Path.Combine(_fx.Root("friend"), "img"), elsewhere, true);
+        Assert.Equal((HttpStatusCode.BadRequest, "bad_path"), await Refused(await s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Set("String/Pet.img", "friend") }))));
+        Assert.Empty(Directory.GetFileSystemEntries(_fx.Outbox));
+    }
+
+    [Fact]
+    public async Task ASymbolicLinkAsThePublishedFile_Is400()
+    {
+        var s = await Start();
+        var elsewhere = Path.Combine(_fx.Temp, "elsewhere-wz");
+        File.Move(_fx.PublishedWz(), elsewhere);
+        EnvRequire.Capability(ImgFixture.TrySymlink(_fx.PublishedWz(), elsewhere, false), "symbolic links cannot be created here");
+        Assert.Equal((HttpStatusCode.BadRequest, "bad_path"), await Refused(await s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Remove("String/Cash.img") }))));
+        Assert.Empty(Directory.GetFileSystemEntries(_fx.Outbox));
+    }
+
+    // ---- a source that goes bad after the request was accepted: the job fails, nothing but the record is left
+
+    [Fact]
+    public async Task AFifoAsASource_FailsTheJob_AndDoesNotHang()
+    {
+        var fifo = Path.Combine(_fx.Img("owner"), "String", "Pet.img");
+        File.Delete(fifo);
+        EnvRequire.Capability(ImgFixture.TryMakeFifo(fifo), "a FIFO cannot be created here");
+        var s = await Start();
+        var job = await s.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("bad_path", Code(job));
+        AssertNothingLeftButTheRecord(job);
+    }
+
+    [Fact]
+    public async Task ASourceThatVanishesAfterTheRequest_FailsTheJob()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        var s = await Start();
+        s.Service.Probe = (stage, _) => { if (stage == "start") File.Delete(Path.Combine(_fx.Img("owner"), "String", "Pet.img")); };
+        var job = await s.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("not_found", Code(job));
+        AssertNothingLeftButTheRecord(job);
+    }
+
+    [Fact]
+    public async Task AFileRewrittenAfterTheRequest_IsPackedAsItIsWhenRead_AndThatIsWhatIsRecorded()
+    {
+        // the file is read once, as it is then; the snapshot holds those bytes and the record holds their hash
+        _fx.WriteImg("owner", "String/Pet.img", "BEFORE");
+        var s = await Start();
+        s.Service.Probe = (stage, _) =>
+        {
+            if (stage == "start") _fx.WriteImg("owner", "String/Pet.img", "AFTER");
+        };
+        var job = await s.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal("done", job.GetProperty("state").GetString());
+        var recorded = job.GetProperty("files")[0].GetProperty("sha256").GetString();
+        Assert.Equal(SyntheticWz.Sha256(Path.Combine(_fx.Img("owner"), "String", "Pet.img")), recorded);   // what was read is what is recorded
         var (_, verify) = await s.Verify(job.GetProperty("jobId").GetString()!);
         Assert.True(verify.GetProperty("identical").GetBoolean(), verify.ToString());
     }
@@ -243,48 +190,77 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
     // ---- caps
 
     [Fact]
-    public async Task TooManyImages_FailsTheJob()
-    {
-        var s = await StartCapped(Capped(maxImages: 2));
-        var job = await s.PackAndWait();
-        Assert.Equal("too_many_images", Code(job));
-        AssertNothingLeftButTheRecord(job);
-    }
-
-    [Fact]
     public async Task TooMuchInput_FailsTheJob()
     {
-        var s = await StartCapped(Capped(maxInput: 500));
-        var job = await s.PackAndWait();
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        var s = await StartCapped(Capped(maxInput: 100));
+        var job = await s.PackAndWait(PackerTestServer.Set("String/Pet.img"));
         Assert.Equal("input_too_large", Code(job));
         AssertNothingLeftButTheRecord(job);
     }
 
     [Fact]
-    public async Task ATooLargeWz_FailsTheJob_AndIsNotLeftInTheOutbox()
+    public async Task OneImageLargerThanTheImageCap_FailsTheJob()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        var s = await StartCapped(Capped(maxImage: 100));
+        var job = await s.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal("image_too_large", Code(job));
+        Assert.Contains("String/Pet.img", job.GetProperty("error").GetProperty("message").GetString());
+        AssertNothingLeftButTheRecord(job);
+    }
+
+    [Fact]
+    public async Task APublishedFileLargerThanTheWzCap_FailsTheJob()
     {
         var s = await StartCapped(Capped(maxWz: 100));
-        var job = await s.PackAndWait();
+        var job = await s.PackAndWait(PackerTestServer.Remove("String/Cash.img"));
         Assert.Equal("output_too_large", Code(job));
         AssertNothingLeftButTheRecord(job);
     }
 
     [Fact]
-    public async Task TheTimeBudget_StopsThePack()
+    public async Task AnOutputLargerThanTheWzCap_FailsTheJob_AndIsNotLeftInTheOutbox()
     {
+        var rnd = new Random(7);
+        _fx.WriteImg("owner", "String/Pet.img", "BIG", img => img.AddProperty(ImgFixture.PixelCanvas("noise", 200, 200,
+            (x, y) => ((byte)rnd.Next(256), (byte)rnd.Next(256), (byte)rnd.Next(256), 255))));   // does not compress
+        var s = await StartCapped(Capped(maxWz: new FileInfo(_fx.PublishedWz()).Length + 1000));
+        var job = await s.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("output_too_large", Code(job));
+        AssertNothingLeftButTheRecord(job);
+    }
+
+    [Fact]
+    public async Task ACapOnTheWz_JustAboveItsSize_StillPacks()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        var probe = await Start();
+        var size = (await probe.PackAndWait(PackerTestServer.Set("String/Pet.img"))).GetProperty("wz").GetProperty("sizeBytes").GetInt64();
+
+        var s = await StartCapped(Capped(maxWz: Math.Max(size, new FileInfo(_fx.PublishedWz()).Length)));   // the cap holds for the published file that is opened, too
+        var job = await s.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+        Assert.True(job.GetProperty("state").GetString() == "done", job.ToString());
+    }
+
+    [Fact]
+    public async Task TheTimeBudget_StopsThePack_AndFreesTheSlot()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
         var s = await StartCapped(Capped(budget: TimeSpan.Zero));
-        var job = await s.PackAndWait();
+        var job = await s.PackAndWait(PackerTestServer.Set("String/Pet.img"));
         Assert.Equal("timeout", Code(job));
         AssertNothingLeftButTheRecord(job);
-        // the slot is free again
         Assert.False(s.Gate.Busy);
     }
 
     [Fact]
     public async Task TheTimeBudget_StopsAVerify_WithATyped504_AndLeavesNoTempFolder()
     {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
         var packer = await Start();
-        var id = (await packer.PackAndWait()).GetProperty("jobId").GetString()!;
+        var id = (await packer.PackAndWait(PackerTestServer.Set("String/Pet.img"))).GetProperty("jobId").GetString()!;
 
         var s = await StartCapped(Capped(budget: TimeSpan.Zero));
         var (status, body) = await s.Verify(id);
@@ -295,22 +271,12 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
         Assert.False(s.Gate.Busy);
     }
 
-    [Fact]
-    public async Task ACapOnTheWz_JustAboveItsSize_StillPacks()
-    {
-        var probe = await Start();
-        var done = await probe.PackAndWait();
-        var size = done.GetProperty("wz").GetProperty("sizeBytes").GetInt64();
-
-        var s = await StartCapped(Capped(maxWz: size));
-        Assert.Equal("done", (await s.PackAndWait()).GetProperty("state").GetString());
-    }
-
     // ---- one at a time
 
     [Fact]
     public async Task OnePackAtATime_TheNextGets503Busy_AndHealthAndJobsStillAnswer()
     {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
         var s = await Start();
         using var entered = new ManualResetEventSlim(false);
         using var release = new ManualResetEventSlim(false);
@@ -319,13 +285,12 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
             if (stage == "packing") { entered.Set(); release.Wait(TimeSpan.FromSeconds(60)); }
         };
 
-        var first = await s.StartPack();
+        var first = await s.StartPack(PackerTestServer.Set("String/Pet.img"));
         Assert.True(entered.Wait(TimeSpan.FromSeconds(30)), "the first pack did not reach the library");
 
         // a second pack, and a verify, are turned away while the first runs
-        var second = await s.PostJson("/v1/pack", PackerTestServer.Pack());
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, second.StatusCode);
-        Assert.Equal("busy", PackerTestServer.ErrorCode(JsonDocument.Parse(await second.Content.ReadAsStringAsync()).RootElement));
+        var second = await s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Set("String/Pet.img") }));
+        Assert.Equal((HttpStatusCode.ServiceUnavailable, "busy"), await Refused(second));
         var verify = await s.Verify(first);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, verify.Status);
 
@@ -341,21 +306,22 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
 
         // and now the next one is accepted
         s.Service.Probe = null;
-        Assert.Equal("done", (await s.PackAndWait()).GetProperty("state").GetString());
+        Assert.Equal("done", (await s.PackAndWait(PackerTestServer.Set("String/Pet.img"))).GetProperty("state").GetString());
     }
 
     [Fact]
     public async Task ManyPacksAtOnce_ExactlyOneIsAccepted()
     {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
         var s = await Start();
         using var release = new ManualResetEventSlim(false);
         using var entered = new ManualResetEventSlim(false);
         s.Service.Probe = (stage, _) => { if (stage == "packing") { entered.Set(); release.Wait(TimeSpan.FromSeconds(60)); } };
 
-        // the first request wins the slot and is held in the library; the others are sent while it is held
-        var winner = await s.StartPack();
+        // the first request wins the slot and is held; the others are sent while it is held
+        var winner = await s.StartPack(PackerTestServer.Set("String/Pet.img"));
         Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
-        var others = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => s.PostJson("/v1/pack", PackerTestServer.Pack())));
+        var others = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Set("String/Pet.img") }))));
         Assert.All(others, r => Assert.Equal(HttpStatusCode.ServiceUnavailable, r.StatusCode));
         release.Set();
         await s.WaitForJob(winner);
@@ -367,8 +333,9 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
     [Fact]
     public async Task SimultaneousRequests_AtMostOneGetsTheSlot()
     {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
         var s = await Start();
-        var responses = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => s.PostJson("/v1/pack", PackerTestServer.Pack())));
+        var responses = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => s.PostJson("/v1/pack", PackerTestServer.Pack(new[] { PackerTestServer.Set("String/Pet.img") }))));
         var accepted = responses.Count(r => r.StatusCode == HttpStatusCode.Accepted);
         Assert.InRange(accepted, 1, 16);
         // whatever was accepted ran one after the other: every job ends done, and every refusal was a typed busy
@@ -384,12 +351,11 @@ public sealed class PackerFailureAndCapTests : IAsyncLifetime
     [Fact]
     public async Task AFailedPack_GivesTheSlotBack()
     {
-        File.WriteAllText(Path.Combine(_fx.Img("owner"), "String", "notes.txt"), "x");
+        _fx.WriteImg("owner", "String/Pet.img", "x");
         var s = await Start();
-        Assert.Equal("failed", (await s.PackAndWait()).GetProperty("state").GetString());
+        Assert.Equal("failed", (await s.PackAndWait(PackerTestServer.Remove("String/Nothing.img"))).GetProperty("state").GetString());
         Assert.False(s.Gate.Busy);
-        File.Delete(Path.Combine(_fx.Img("owner"), "String", "notes.txt"));
-        Assert.Equal("done", (await s.PackAndWait()).GetProperty("state").GetString());
+        Assert.Equal("done", (await s.PackAndWait(PackerTestServer.Set("String/Pet.img"))).GetProperty("state").GetString());
     }
 }
 #endif

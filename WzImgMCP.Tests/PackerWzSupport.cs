@@ -33,9 +33,11 @@ internal static class SyntheticWz
         };
 
     /// <summary>Writes a version 83 GMS .wz holding <paramref name="images"/> (path below the root, in this order) to <paramref name="path"/>.</summary>
-    public static string Build(string path, IEnumerable<string>? images = null, Func<string, Action<WzImage>>? content = null)
+    public static string Build(string path, IEnumerable<string>? images = null, Func<string, Action<WzImage>>? content = null,
+        short version = 83, WzMapleVersion key = WzMapleVersion.GMS)
     {
-        using var wz = new WzFile(83, WzMapleVersion.GMS) { Name = Path.GetFileName(path) };
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var wz = new WzFile(version, key) { Name = Path.GetFileName(path) };
         foreach (var rel in images ?? DefaultImages)
         {
             var parts = rel.Split('/');
@@ -56,6 +58,36 @@ internal static class SyntheticWz
         }
         wz.SaveToDisk(path);
         return path;
+    }
+
+    /// <summary>Opens <paramref name="source"/>, lets <paramref name="change"/> edit it, and saves the result to <paramref name="destination"/> (another path). For making a "wrong" .wz out of a right one.</summary>
+    public static string Modify(string source, string destination, Action<WzFile> change)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        using var wz = Open(source);
+        change(wz);
+        wz.SaveToDisk(destination);
+        return destination;
+    }
+
+    public static WzImage Find(WzFile wz, string path)
+    {
+        var parts = path.Split('/');
+        var dir = wz.WzDirectory;
+        foreach (var part in parts[..^1]) dir = dir.GetDirectoryByName(part)!;
+        return dir.GetImageByName(parts[^1])!;
+    }
+
+    /// <summary>Replaces an image the way the packer does: parse, clear, fill with copies, mark changed.</summary>
+    public static void Replace(WzFile wz, string path, Action<WzImage> fill)
+    {
+        var image = Find(wz, path);
+        Assert.True(image.ParseImage());
+        image.ClearProperties();
+        var fresh = new WzImage(image.Name);
+        fill(fresh);
+        foreach (var property in fresh.WzProperties.ToList()) image.WzProperties.Add(property.DeepClone());
+        image.Changed = true;
     }
 
     /// <summary>Opens a .wz with version 83 and key GMS fixed, as the packer does. Throws when it does not open.</summary>
