@@ -71,6 +71,60 @@ public sealed class PackerPackVerifyTests : IAsyncLifetime
         return dir.GetImageByName(parts[^1])!;
     }
 
+    // ---- what the publisher reads (basedOn, the checks 2, 4 and 5, the published sha256)
+
+    [Fact]
+    public async Task TheJobCarriesBasedOn_TheShaOfThePublishedFile()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET");
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal(SyntheticWz.Sha256(_fx.PublishedWz()), job.GetProperty("basedOn").GetProperty("sha256").GetString());
+        // read again from the job record on disk (a restart of the packer): same answer
+        var record = JsonDocument.Parse(File.ReadAllText(Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!, "job.json"))).RootElement;
+        Assert.Equal(SyntheticWz.Sha256(_fx.PublishedWz()), record.GetProperty("basedOn").GetProperty("sha256").GetString());
+    }
+
+    [Fact]
+    public async Task Verify_ReportsVersionKeyAndTheOpenLinkAndFormatChecks()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET", img => img.AddProperty(new WzUOLProperty("link", "who")));
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+        var body = await VerifyOk(job);
+        Assert.Equal(83, body.GetProperty("wzVersion").GetInt32());
+        Assert.Equal(0, body.GetProperty("openErrors").GetArrayLength());
+        Assert.Equal(0, body.GetProperty("brokenLinks").GetInt32());
+        Assert.Equal(0, body.GetProperty("unsupportedFormats").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Verify_CountsALinkThatLeadsNowhere()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET", img =>
+        {
+            img.AddProperty(new WzUOLProperty("good", "who"));
+            img.AddProperty(new WzUOLProperty("bad", "nothing/here"));
+        });
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+        var (status, body) = await _server.Verify(job.GetProperty("jobId").GetString()!);
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(1, body.GetProperty("brokenLinks").GetInt32());
+        Assert.Equal(0, body.GetProperty("openErrors").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task PublishedEndpoint_AnswersTheShaOfThePackersCopy()
+    {
+        var response = await _server.Client.GetAsync("/v1/published?category=String");
+        var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(SyntheticWz.Sha256(_fx.PublishedWz()), body.GetProperty("sha256").GetString());
+        Assert.Equal(new FileInfo(_fx.PublishedWz()).Length, body.GetProperty("sizeBytes").GetInt64());
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await _server.Client.GetAsync("/v1/published")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await _server.Client.GetAsync("/v1/published?category=..%2FString")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _server.Client.GetAsync("/v1/published?category=Item")).StatusCode);
+    }
+
     // ---- replace
 
     [Fact]

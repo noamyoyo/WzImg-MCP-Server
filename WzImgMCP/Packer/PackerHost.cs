@@ -239,6 +239,15 @@ public static class PackerHost
             return Results.Json(new { jobId = job.JobId }, Json, statusCode: StatusCodes.Status202Accepted);
         }).AddEndpointFilter(TypedErrors);
 
+        // The sha256 of the packer's read-only copy of the published file: the publisher compares it with the manifest and its client folder.
+        app.MapGet("/v1/published", async (HttpContext context, PackerService service) =>
+        {
+            var category = PackerTree.RequireCategory(context.Request.Query["category"].Count == 1 ? context.Request.Query["category"][0] : null);
+            var ct = context.RequestAborted;
+            var (sha, size) = await Task.Run(() => service.PublishedInfo(category, ct), ct);
+            return Results.Json(new { category, wz = category + ".wz", sha256 = sha, sizeBytes = size }, Json);
+        }).WithMetadata(new LongRunning()).AddEndpointFilter(TypedErrors);
+
         app.MapGet("/v1/jobs/{id}", (string id, PackerJobStore jobs) =>
         {
             var job = jobs.Find(id) ?? throw new ViewerApiException(404, "not_found", "no such job");

@@ -24,7 +24,14 @@ public sealed record PackerJobView(
     int ImgCount,
     IReadOnlyList<PackerFileResult> Files,
     IReadOnlyList<string> Warnings,
-    PackerError? Error);
+    PackerError? Error)
+{
+    /// <summary>What the pack was made from: the sha256 of the published file (the publisher's "based on"). Only written; a record read back derives it from <c>Published</c>.</summary>
+    public PackerBasedOn? BasedOn => Published == null ? null : new PackerBasedOn(Published.Sha256);
+}
+
+/// <summary>The <c>basedOn</c> of a pack job.</summary>
+public sealed record PackerBasedOn(string Sha256);
 
 /// <summary>One pack job. States: <c>queued</c> (created, thread not started), <c>running</c>, <c>done</c>, <c>failed</c>.</summary>
 public sealed class PackerJob

@@ -110,19 +110,19 @@ public sealed class PackerHostTests : IAsyncLifetime
     // ---- routes and methods
 
     [Fact]
-    public async Task OnlyTheFourExpectedRoutesExist()
+    public async Task OnlyTheFiveExpectedRoutesExist()
     {
         var routes = _server.App.Services.GetRequiredService<EndpointDataSource>().Endpoints
             .Select(e => ((RouteEndpoint)e).RoutePattern.RawText)
             .OrderBy(r => r, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "/v1/health", "/v1/jobs/{id}", "/v1/pack", "/v1/verify" }, routes);
+        Assert.Equal(new[] { "/v1/health", "/v1/jobs/{id}", "/v1/pack", "/v1/published", "/v1/verify" }, routes);
     }
 
     [Fact]
     public void EveryRoute_HasExactlyTheMethodsItNeeds()
     {
-        var expected = new Dictionary<string, string> { ["/v1/health"] = "GET", ["/v1/jobs/{id}"] = "GET", ["/v1/pack"] = "POST", ["/v1/verify"] = "POST" };
+        var expected = new Dictionary<string, string> { ["/v1/health"] = "GET", ["/v1/jobs/{id}"] = "GET", ["/v1/pack"] = "POST", ["/v1/published"] = "GET", ["/v1/verify"] = "POST" };
         foreach (var endpoint in _server.App.Services.GetRequiredService<EndpointDataSource>().Endpoints)
         {
             var route = Assert.IsType<RouteEndpoint>(endpoint);

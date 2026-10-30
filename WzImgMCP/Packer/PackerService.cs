@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using MapleLib.Helpers;
 using MapleLib.WzLib;
 using MapleLib.WzLib.Serializer;
+using MapleLib.WzLib.WzProperties;
 using Microsoft.Extensions.Logging;
 using WzImgMCP.Viewer;
 using WzImgMCP.Viewer.Diff;
@@ -20,7 +21,20 @@ public sealed record PackerDiff(string Path, string Kind, string Type);
 /// </summary>
 public sealed record PackerVerifyResult(
     bool Identical, bool UnchangedIdentical, bool OnlyListedDiffer, int Version, string Key,
-    int UnchangedCompared, int FilesCompared, IReadOnlyList<PackerDiff> Diffs, bool Truncated);
+    int UnchangedCompared, int FilesCompared, IReadOnlyList<PackerDiff> Diffs, bool Truncated)
+{
+    /// <summary>The version the new file opens as: the same number as <c>Version</c>, under the name the publisher reads.</summary>
+    public int WzVersion => Version;
+
+    /// <summary>Check 4: listed images (<c>String/Pet.img</c>) that do not open in the new file.</summary>
+    public IReadOnlyList<string> OpenErrors { get; init; } = Array.Empty<string>();
+
+    /// <summary>Check 4: links (UOL) inside the listed images that lead nowhere in the new file.</summary>
+    public int BrokenLinks { get; init; }
+
+    /// <summary>Check 5: pictures of the listed images in a format the v83 client cannot show (<c>String/Pet.img: format 1026</c>).</summary>
+    public IReadOnlyList<string> UnsupportedFormats { get; init; } = Array.Empty<string>();
+}
 
 /// <summary>
 /// Packs a change set into the published <c>&lt;Category&gt;.wz</c>: it opens that file (read-only mount), replaces, adds or removes only
@@ -60,6 +74,20 @@ public sealed class PackerService
 
     /// <summary>Test seam: called with "start" (before the work folder is made), "packing" (just before the published file is opened), "verify" (before the .wz is copied) and "copied" (after it was copied and hashed), with the job id.</summary>
     public Action<string, string>? Probe { get; set; }
+
+    // ------------------------------------------------------ published file
+
+    /// <summary>The sha256 and size of the packer's read-only copy of the published <c>&lt;Category&gt;.wz</c>. The publisher compares it with the target manifest and its own client folder (<c>published_out_of_sync</c>).</summary>
+    public (string Sha256, long SizeBytes) PublishedInfo(string category, CancellationToken cancellationToken)
+    {
+        PackerTree.RequireCategory(category);
+        var path = PublishedPath(category);
+        var stamp = _files.Stat(path) ?? throw new ViewerApiException(503, "published_unavailable", "the published file cannot be read");
+        var sha = Sha256Of(path, cancellationToken);
+        if (_files.Stat(path) != stamp)
+            throw new ViewerApiException(409, "published_changed", "the published file changed while it was read; retry");
+        return (sha, stamp.Size);
+    }
 
     // ---------------------------------------------------------------- pack
 
@@ -621,6 +649,18 @@ public sealed class PackerService
 
             // 6. every listed set, taken out of the new file as an extracted .img, against the input snapshot
             int filesCompared = 0;
+            var openErrors = new List<string>();
+            var unsupported = new List<string>();
+            int brokenLinks = 0;
+            foreach (var file in sets)
+            {
+                token.ThrowIfCancellationRequested();
+                if (!inNew.ContainsKey(file.WzPath(category))) continue;   // already reported as missing
+                var (opened, broken, formats) = Inspect(newWz, category, file.Img);
+                if (!opened) openErrors.Add(file.Img);
+                brokenLinks += broken;
+                foreach (var format in formats) unsupported.Add(file.Img + ": format " + format);
+            }
             if (sets.Count > 0 && !token.IsCancellationRequested)
             {
                 var mine = new List<PackerImage>();
@@ -666,7 +706,12 @@ public sealed class PackerService
             }
 
             bool identical = unchangedIdentical && onlyListedDiffer && diffs.Count == 0 && !truncated;
-            return new PackerVerifyResult(identical, unchangedIdentical, onlyListedDiffer, newWz.Version, Key, unchangedCompared, filesCompared, diffs, truncated);
+            return new PackerVerifyResult(identical, unchangedIdentical, onlyListedDiffer, newWz.Version, Key, unchangedCompared, filesCompared, diffs, truncated)
+            {
+                OpenErrors = openErrors.Take(_options.MaxDiffs).ToArray(),
+                BrokenLinks = brokenLinks,
+                UnsupportedFormats = unsupported.Take(_options.MaxDiffs).ToArray(),
+            };
         }
         catch (OperationCanceledException) when (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -721,6 +766,70 @@ public sealed class PackerService
             diffs.Add(new PackerDiff(name, kind, "image"));
         }
         return (unchangedIdentical, onlyListedDiffer, compared);
+    }
+
+    /// <summary>The picture formats the v83 client can show: 4444 (1), 8888 (2), 1555 (257), 565 (513, 517). Format 3 and the compressed ones (DXT 1026, 2050, 4098) are not among them.</summary>
+    private static readonly HashSet<int> SupportedFormats = new() { 1, 2, 257, 513, 517 };
+
+    /// <summary>
+    /// Checks one listed image of the new file (check 4 and 5): does it open, how many of its links (UOL) lead nowhere, and which picture
+    /// formats it holds that the client cannot show. An image that does not open reports (false, 0, empty).
+    /// </summary>
+    private static (bool Opened, int BrokenLinks, IReadOnlyList<int> UnsupportedFormats) Inspect(WzFile wz, string category, string img)
+    {
+        try
+        {
+            var (_, image) = FindImage(wz.WzDirectory, img[(category.Length + 1)..].Split('/'), img);
+            if (image == null || !image.ParseImage())
+                return (false, 0, Array.Empty<int>());
+            int broken = 0;
+            var formats = new SortedSet<int>();
+            Walk(image.WzProperties, ref broken, formats);
+            return (true, broken, formats.ToArray());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (false, 0, Array.Empty<int>());
+        }
+        finally
+        {
+            ErrorLogger.ClearErrors();
+        }
+
+        static void Walk(IEnumerable<WzImageProperty> properties, ref int broken, SortedSet<int> formats)
+        {
+            foreach (var property in properties)
+            {
+                switch (property)
+                {
+                    case WzUOLProperty uol when !UolResolves(uol): broken++; break;
+                    case WzCanvasProperty canvas:
+                        if (!SupportedFormats.Contains((int)canvas.PngProperty.Format)) formats.Add((int)canvas.PngProperty.Format);
+                        break;
+                }
+                if (property.WzProperties is { Count: > 0 } children)
+                    Walk(children, ref broken, formats);
+            }
+        }
+    }
+
+    /// <summary>Follows a UOL the way the library does (a path of names and "..", starting at the property's folder, or at the image when it does not begin with ".."). False when a step finds nothing.</summary>
+    private static bool UolResolves(WzUOLProperty uol)
+    {
+        if (string.IsNullOrEmpty(uol.Value) || uol.Parent == null) return false;
+        var paths = uol.Value.Split('/');
+        WzObject? current = uol.Parent;
+        if (paths[0] != "..")
+            while (current != null && current is not WzImage) current = current.Parent;   // the image that holds the link
+        foreach (var step in paths)
+        {
+            if (current == null) return false;
+            if (step == "..") current = current.Parent;
+            else if (current is WzImageProperty p) current = p[step];
+            else if (current is WzImage i) current = i[step];
+            else return false;
+        }
+        return current != null;
     }
 
     /// <summary>One image of the new file as an extracted .img (zero key, BMS), the form of the input snapshot. Null when it does not parse.</summary>
