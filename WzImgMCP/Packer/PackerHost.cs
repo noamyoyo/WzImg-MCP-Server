@@ -77,6 +77,8 @@ public static class PackerHost
         foreach (var name in PackerOptions.SourceNames)
             logger.LogInformation("Source {Source}: {Readable}", name, ViewerPathResolver.IsReadableDirectory(Path.Combine(options.Roots[name], "img")) ? "readable" : "not readable");
 
+        logger.LogInformation("Published folder: {Readable}", options.PublishedDir != null && ViewerPathResolver.IsReadableDirectory(options.PublishedDir) ? "readable" : "not readable");
+
         await app.RunAsync();
         return 0;
     }
