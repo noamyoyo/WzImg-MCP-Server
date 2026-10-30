@@ -9,8 +9,8 @@ public sealed class PackerConfigException : Exception
 }
 
 /// <summary>
-/// Settings of the packer mode (<c>--packer</c>): the shared secret, the three read-only source roots, the one writable
-/// outbox and the caps. Every cap that comes from the environment is strict: a value that is not a whole number inside its
+/// Settings of the packer mode (<c>--packer</c>): the shared secret, the three read-only source roots, the read-only folder
+/// of the published <c>.wz</c> files, the one writable outbox and the caps. Every cap that comes from the environment is strict: a value that is not a whole number inside its
 /// range stops the start (exit code 2) instead of silently falling back.
 /// </summary>
 public sealed class PackerOptions
@@ -23,6 +23,7 @@ public sealed class PackerOptions
     public const string RootEnvPrefix = "WZ_PACKER_ROOT_";
     public const string OutboxEnvVar = "WZ_PACKER_OUTBOX";
     public const string TempEnvVar = "WZ_PACKER_TMP";
+    public const string PublishedEnvVar = "WZ_PACKER_PUBLISHED_DIR";
 
     /// <summary>Source names, in the order they are reported. canon is configured and reported by health; owner and friend are what a request can name.</summary>
     public static readonly string[] SourceNames = { "canon", "owner", "friend" };
@@ -36,11 +37,11 @@ public sealed class PackerOptions
     public const string MaxRequestsEnvVar = "WZ_PACKER_MAX_REQUESTS";
     public const int DefaultMaxConcurrentRequests = 8;
     public const string MaxInputMbEnvVar = "WZ_PACKER_MAX_INPUT_MB";
-    public const int DefaultMaxInputMb = 4096;
+    public const int DefaultMaxInputMb = 512;
+    public const string MaxFilesEnvVar = "WZ_PACKER_MAX_FILES";
+    public const int DefaultMaxFiles = 2000;
     public const string MaxWzMbEnvVar = "WZ_PACKER_MAX_WZ_MB";
     public const int DefaultMaxWzMb = 1024;
-    public const string MaxImagesEnvVar = "WZ_PACKER_MAX_IMAGES";
-    public const int DefaultMaxImages = 200_000;
     public const string MaxImageMbEnvVar = "WZ_PACKER_MAX_IMG_MB";
     public const int DefaultMaxImageMb = 64;
     public const string TimeBudgetEnvVar = "WZ_PACKER_TIME_BUDGET_SECONDS";
@@ -62,6 +63,9 @@ public sealed class PackerOptions
     /// <summary>Source name to root directory (full path). Each root holds an <c>img</c> folder with the extracted tree. Read only.</summary>
     public IReadOnlyDictionary<string, string> Roots { get; }
 
+    /// <summary>The read-only folder that holds the published <c>&lt;Category&gt;.wz</c> files (<c>WZ_PACKER_PUBLISHED_DIR</c>); null when not configured, and then no pack can start.</summary>
+    public string? PublishedDir { get; }
+
     /// <summary>The only place the packer writes: one folder per job, <c>&lt;jobId&gt;/&lt;Category&gt;.wz</c>.</summary>
     public string Outbox { get; }
 
@@ -71,14 +75,14 @@ public sealed class PackerOptions
     /// <summary>Requests that may run at the same time; the next one gets 503 <c>busy</c>. Health is outside it.</summary>
     public int MaxConcurrentRequests { get; init; } = DefaultMaxConcurrentRequests;
 
-    /// <summary>Most bytes of .img files one pack may read; a bigger category fails with <c>input_too_large</c>.</summary>
+    /// <summary>Most files one pack request may list; more is a 400 <c>too_many_files</c>.</summary>
+    public int MaxFiles { get; init; } = DefaultMaxFiles;
+
+    /// <summary>Most bytes of listed .img files one pack may read; more fails with <c>input_too_large</c>. The listed images are held in memory while the .wz is saved.</summary>
     public long MaxInputBytes { get; init; } = DefaultMaxInputMb * 1024L * 1024L;
 
-    /// <summary>Largest .wz a pack may produce; a bigger one is deleted and fails with <c>output_too_large</c>.</summary>
+    /// <summary>Largest .wz a pack may open or produce; a bigger one fails with <c>output_too_large</c> (the output is deleted).</summary>
     public long MaxWzBytes { get; init; } = DefaultMaxWzMb * 1024L * 1024L;
-
-    /// <summary>Most .img files in one category.</summary>
-    public int MaxImages { get; init; } = DefaultMaxImages;
 
     /// <summary>Largest single .img the verify step reads (the viewer loader's cap).</summary>
     public long MaxImageBytes { get; init; } = DefaultMaxImageMb * 1024L * 1024L;
@@ -98,7 +102,7 @@ public sealed class PackerOptions
     /// <summary>Longest time an ordinary request (not verify) may run before it is cut off with 504 <c>timeout</c>.</summary>
     public TimeSpan RequestTimeout { get; init; } = DefaultRequestTimeout;
 
-    public PackerOptions(string? token, IReadOnlyDictionary<string, string> roots, string? outbox)
+    public PackerOptions(string? token, IReadOnlyDictionary<string, string> roots, string? outbox, string? publishedDir = null)
     {
         token = token?.Trim();   // a trailing newline from a secret file is not part of the token
         if (string.IsNullOrEmpty(token))
@@ -126,6 +130,20 @@ public sealed class PackerOptions
         {
             if (Overlaps(outbox, root))
                 throw new PackerConfigException($"{OutboxEnvVar} must not be the same folder as, or inside or around, the root of '{name}'.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(publishedDir))
+        {
+            publishedDir = publishedDir.Trim();
+            if (!Path.IsPathRooted(publishedDir))
+                throw new PackerConfigException($"{PublishedEnvVar} must be an absolute path.");
+            publishedDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(publishedDir));
+            if (Overlaps(outbox, publishedDir))
+                throw new PackerConfigException($"{OutboxEnvVar} must not be the same folder as, or inside or around, {PublishedEnvVar}.");
+            foreach (var (name, root) in roots)
+                if (Overlaps(publishedDir, root))
+                    throw new PackerConfigException($"{PublishedEnvVar} must not be the same folder as, or inside or around, the root of '{name}'.");
+            PublishedDir = publishedDir;
         }
 
         Token = token;
@@ -158,13 +176,17 @@ public sealed class PackerOptions
         if (!string.IsNullOrWhiteSpace(temp) && !Path.IsPathRooted(temp.Trim()))
             throw new PackerConfigException($"{TempEnvVar} must be an absolute path.");
 
-        return new PackerOptions(getEnv(TokenEnvVar), roots, getEnv(OutboxEnvVar))
+        var published = getEnv(PublishedEnvVar);
+        if (string.IsNullOrWhiteSpace(published))
+            throw new PackerConfigException($"{PublishedEnvVar} is not set. The packer opens the published .wz files from this read-only folder.");
+
+        return new PackerOptions(getEnv(TokenEnvVar), roots, getEnv(OutboxEnvVar), published)
         {
             TempRoot = string.IsNullOrWhiteSpace(temp) ? Path.TrimEndingDirectorySeparator(Path.GetTempPath()) : Path.TrimEndingDirectorySeparator(Path.GetFullPath(temp.Trim())),
             MaxConcurrentRequests = Strict(getEnv(MaxRequestsEnvVar), MaxRequestsEnvVar, DefaultMaxConcurrentRequests, 1, 32),
             MaxInputBytes = Strict(getEnv(MaxInputMbEnvVar), MaxInputMbEnvVar, DefaultMaxInputMb, 1, 65536) * 1024L * 1024L,
             MaxWzBytes = Strict(getEnv(MaxWzMbEnvVar), MaxWzMbEnvVar, DefaultMaxWzMb, 1, 16384) * 1024L * 1024L,
-            MaxImages = Strict(getEnv(MaxImagesEnvVar), MaxImagesEnvVar, DefaultMaxImages, 1, 2_000_000),
+            MaxFiles = Strict(getEnv(MaxFilesEnvVar), MaxFilesEnvVar, DefaultMaxFiles, 1, 20000),
             MaxImageBytes = Strict(getEnv(MaxImageMbEnvVar), MaxImageMbEnvVar, DefaultMaxImageMb, 1, 1024) * 1024L * 1024L,
             TimeBudget = TimeSpan.FromSeconds(Strict(getEnv(TimeBudgetEnvVar), TimeBudgetEnvVar, DefaultTimeBudgetSeconds, 10, 14400)),
             MaxDiffs = Strict(getEnv(MaxDiffsEnvVar), MaxDiffsEnvVar, DefaultMaxDiffs, 1, 100000),
@@ -172,6 +194,10 @@ public sealed class PackerOptions
             MaxJobsKept = Strict(getEnv(MaxJobsKeptEnvVar), MaxJobsKeptEnvVar, DefaultMaxJobsKept, 1, 10000),
         };
     }
+
+    /// <summary>The published file of a category: <c>&lt;PublishedDir&gt;/&lt;Category&gt;.wz</c>. The category is a plain name (checked by the caller).</summary>
+    public string PublishedFile(string category)
+        => Path.Combine(PublishedDir ?? throw new InvalidOperationException("no published folder is configured"), category + ".wz");
 
     /// <summary>Unset or blank gives the default; anything else must be a whole number in [min, max] or the start fails.</summary>
     private static int Strict(string? raw, string name, int fallback, int min, int max)
@@ -181,6 +207,18 @@ public sealed class PackerOptions
         if (!int.TryParse(raw.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var value) || value < min || value > max)
             throw new PackerConfigException($"{name} must be a whole number from {min} to {max}.");
         return value;
+    }
+
+    /// <summary>The published folder must exist and be a real folder (not a symbolic link). Called once at start; throws <see cref="PackerConfigException"/> (no path in the message).</summary>
+    public void CheckPublished()
+    {
+        if (PublishedDir == null)
+            throw new PackerConfigException($"{PublishedEnvVar} is not set.");
+        var info = new DirectoryInfo(PublishedDir);
+        if (info.LinkTarget != null)
+            throw new PackerConfigException($"{PublishedEnvVar} is a symbolic link; point it at the real folder.");
+        if (!info.Exists)
+            throw new PackerConfigException($"{PublishedEnvVar} does not exist or is not a folder.");
     }
 
     /// <summary>

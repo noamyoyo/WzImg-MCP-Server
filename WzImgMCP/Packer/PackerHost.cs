@@ -25,6 +25,7 @@ namespace WzImgMCP.Packer;
 public static class PackerHost
 {
     private const int MaxBodyBytes = 4096;
+    private const int MaxPackBodyBytes = 4 * 1024 * 1024;   // a pack lists up to PackerOptions.MaxFiles files
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -40,8 +41,8 @@ public static class PackerHost
         NumberHandling = JsonNumberHandling.Strict,
     };
 
-    private sealed record PackRequest(string? Person, string? Category, int? WzVersion, string? Key);
-    private sealed record VerifyRequest(string? JobId, string? Person);
+    private sealed record PackRequest(string? Category, List<PackRequestFile?>? Files, int? WzVersion, string? Key);
+    private sealed record VerifyRequest(string? JobId);
 
     /// <summary>
     /// Entry point of the mode. Returns the process exit code: 0 after a normal stop, 2 when the configuration is invalid
@@ -54,6 +55,7 @@ public static class PackerHost
         {
             options = PackerOptions.FromEnvironment(getEnv);
             options.CheckOutbox();
+            options.CheckPublished();
         }
         catch (PackerConfigException ex)
         {
@@ -103,7 +105,7 @@ public static class PackerHost
         builder.WebHost.ConfigureKestrel(k =>
         {
             k.AddServerHeader = false;
-            k.Limits.MaxRequestBodySize = 64 * 1024;   // the handlers refuse anything over MaxBodyBytes with a typed error
+            k.Limits.MaxRequestBodySize = MaxPackBodyBytes + 1024;   // the handlers refuse anything over their own limit with a typed error
         });
 
         builder.Services.AddSingleton(options);
@@ -220,21 +222,31 @@ public static class PackerHost
             version = typeof(PackerHost).Assembly.GetName().Version?.ToString(3) ?? "unknown",
             sources = PackerOptions.SourceNames.ToDictionary(n => n, n => ViewerPathResolver.IsReadableDirectory(Path.Combine(o.Roots[n], "img"))),
             outbox = Directory.Exists(o.Outbox),
+            published = o.PublishedDir != null && ViewerPathResolver.IsReadableDirectory(o.PublishedDir),
             busy = gate.Busy,
         }, Json)).WithMetadata(new NoRequestSlot());
 
-        app.MapPost("/v1/pack", async (HttpContext context, PackerService service) =>
+        app.MapPost("/v1/pack", async (HttpContext context, PackerService service, PackerOptions o) =>
         {
-            var request = await ReadBody<PackRequest>(context);
-            var person = RequirePerson(request.Person);
+            var request = await ReadBody<PackRequest>(context, MaxPackBodyBytes);
             var category = PackerTree.RequireCategory(request.Category);
             if (request.WzVersion != PackerService.WzVersion)
                 throw new ViewerApiException(400, "bad_request", $"wzVersion must be {PackerService.WzVersion}");
             if (request.Key != PackerService.Key)
                 throw new ViewerApiException(400, "bad_request", $"key must be {PackerService.Key}");
-            var job = service.StartPack(person, category);
+            var files = PackerFiles.Validate(category, request.Files, o.MaxFiles);
+            var job = service.StartPack(category, files);
             return Results.Json(new { jobId = job.JobId }, Json, statusCode: StatusCodes.Status202Accepted);
         }).AddEndpointFilter(TypedErrors);
+
+        // The sha256 of the packer's read-only copy of the published file: the publisher compares it with the manifest and its client folder.
+        app.MapGet("/v1/published", async (HttpContext context, PackerService service) =>
+        {
+            var category = PackerTree.RequireCategory(context.Request.Query["category"].Count == 1 ? context.Request.Query["category"][0] : null);
+            var ct = context.RequestAborted;
+            var (sha, size) = await Task.Run(() => service.PublishedInfo(category, ct), ct);
+            return Results.Json(new { category, wz = category + ".wz", sha256 = sha, sizeBytes = size }, Json);
+        }).WithMetadata(new LongRunning()).AddEndpointFilter(TypedErrors);
 
         app.MapGet("/v1/jobs/{id}", (string id, PackerJobStore jobs) =>
         {
@@ -244,10 +256,9 @@ public static class PackerHost
 
         app.MapPost("/v1/verify", async (HttpContext context, PackerService service, PackerWorkGate gate) =>
         {
-            var request = await ReadBody<VerifyRequest>(context);
+            var request = await ReadBody<VerifyRequest>(context, MaxBodyBytes);
             if (!PackerJobStore.IsJobId(request.JobId))
                 throw new ViewerApiException(404, "not_found", "no such job");
-            var person = RequirePerson(request.Person);
             var ct = context.RequestAborted;
 
             var lease = gate.TryEnter() ?? throw new ViewerApiException(503, "busy", "a pack or verify is already running; retry shortly");
@@ -257,7 +268,7 @@ public static class PackerHost
                 // The library cannot cancel a parse, so the work runs on its own thread, and the slot and the gate stay taken until it has really ended.
                 task = Task.Run(() =>
                 {
-                    try { return service.Verify(request.JobId!, person, ct); }
+                    try { return service.Verify(request.JobId!, ct); }
                     finally { lease.Dispose(); }
                 }, CancellationToken.None);
             }
@@ -275,28 +286,28 @@ public static class PackerHost
     private static string AllowFor(PathString path)
         => path.Value is "/v1/pack" or "/v1/verify" ? "POST" : "GET";
 
-    private static string RequirePerson(string? person)
-        => person is "owner" or "friend" ? person : throw new ViewerApiException(400, "unknown_source", "person must be owner or friend");
-
-    /// <summary>Reads and checks a small JSON body: application/json, at most 4 KiB, no unknown field.</summary>
-    private static async Task<T> ReadBody<T>(HttpContext context) where T : class
+    /// <summary>Reads and checks a JSON body: application/json, at most <paramref name="maxBytes"/>, no unknown field.</summary>
+    private static async Task<T> ReadBody<T>(HttpContext context, int maxBytes) where T : class
     {
         var request = context.Request;
-        if (request.ContentLength is > MaxBodyBytes)
+        if (request.ContentLength is { } declared && declared > maxBytes)
             throw new ViewerApiException(413, "too_large", "the request body is too large");
         if (request.ContentType == null || !request.ContentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase))
             throw new ViewerApiException(415, "unsupported_media_type", "send application/json");
 
-        var buffer = new byte[MaxBodyBytes + 1];
+        using var body = new MemoryStream();
+        var chunk = new byte[16 * 1024];
         int total = 0;
-        while (total < buffer.Length)
+        while (true)
         {
-            int n = await request.Body.ReadAsync(buffer.AsMemory(total), context.RequestAborted);
+            int n = await request.Body.ReadAsync(chunk.AsMemory(), context.RequestAborted);
             if (n == 0) break;
             total += n;
+            if (total > maxBytes)
+                throw new ViewerApiException(413, "too_large", "the request body is too large");
+            body.Write(chunk, 0, n);
         }
-        if (total > MaxBodyBytes)
-            throw new ViewerApiException(413, "too_large", "the request body is too large");
+        var buffer = body.GetBuffer();
         if (total == 0)
             throw new ViewerApiException(400, "bad_request", "a JSON body is required");
         try

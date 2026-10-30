@@ -1,6 +1,5 @@
 #if LINUX_BUILD
 using System.Net;
-using System.Security.Cryptography;
 using System.Text.Json;
 using MapleLib.WzLib;
 using MapleLib.WzLib.WzProperties;
@@ -9,7 +8,10 @@ using WzImgMCP.Utils;
 
 namespace WzImgMCP.Tests;
 
-/// <summary>Pack a synthetic category over real HTTP, re-extract and compare. Synthetic data only.</summary>
+/// <summary>
+/// Pack a change set into a published .wz over real HTTP, then verify it. The published file is a synthetic String.wz (version 83,
+/// key GMS, seven images in three folders); the people's copies hold zero-IV .img files. Synthetic data only.
+/// </summary>
 [Collection("AllowedRootEnv")]
 public sealed class PackerPackVerifyTests : IAsyncLifetime
 {
@@ -20,6 +22,7 @@ public sealed class PackerPackVerifyTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         Environment.SetEnvironmentVariable(PathGuard.EnvVar, null);
+        _fx.BuildPublished();
         _fx.Populate("owner");
         _fx.Populate("friend");
         _server = await PackerTestServer.StartAsync(_fx.Options());
@@ -32,180 +35,459 @@ public sealed class PackerPackVerifyTests : IAsyncLifetime
         _fx.Dispose();
     }
 
-    [Fact]
-    public async Task Pack_ProducesTheWz_AndTheJobAnswersTheContract()
+    private async Task<JsonElement> Done(params object[] files)
     {
-        var job = await _server.PackAndWait();
-
-        Assert.Equal("done", job.GetProperty("state").GetString());
-        var wz = job.GetProperty("wz");
-        Assert.Equal("String.wz", wz.GetProperty("name").GetString());
-        var file = Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!, "String.wz");
-        Assert.True(File.Exists(file));
-        Assert.Equal(new FileInfo(file).Length, wz.GetProperty("sizeBytes").GetInt64());
-        Assert.Equal(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file))).ToLowerInvariant(), wz.GetProperty("sha256").GetString());
-        Assert.Equal(3, job.GetProperty("imgCount").GetInt32());
-        Assert.Equal(0, job.GetProperty("warnings").GetArrayLength());
-        Assert.False(job.TryGetProperty("error", out _));
+        var job = await _server.PackAndWait(files);
+        Assert.True(job.GetProperty("state").GetString() == "done", job.ToString());
+        return job;
     }
 
-    [Fact]
-    public async Task PackThenVerify_ReExtractedWzIsIdenticalToThePersonsCopy()
-    {
-        var job = await _server.PackAndWait();
-        var (status, body) = await _server.Verify(job.GetProperty("jobId").GetString()!);
+    private string OutWz(JsonElement job) => Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!, "String.wz");
 
+    private async Task<JsonElement> VerifyOk(JsonElement job)
+    {
+        var (status, body) = await _server.Verify(job.GetProperty("jobId").GetString()!);
         Assert.Equal(HttpStatusCode.OK, status);
         Assert.True(body.GetProperty("identical").GetBoolean(), body.ToString());
-        Assert.Equal(3, body.GetProperty("filesCompared").GetInt32());
-        Assert.Equal(0, body.GetProperty("diffs").GetArrayLength());
+        Assert.True(body.GetProperty("unchangedIdentical").GetBoolean(), body.ToString());
+        Assert.True(body.GetProperty("onlyListedDiffer").GetBoolean(), body.ToString());
+        Assert.Equal(83, body.GetProperty("version").GetInt32());
+        Assert.Equal("GMS", body.GetProperty("key").GetString());
         Assert.False(body.GetProperty("truncated").GetBoolean());
+        return body;
+    }
+
+    private static string StringOf(WzImage image, string name)
+    {
+        Assert.True(image.ParseImage());
+        return ((WzStringProperty)image[name]!).Value;
+    }
+
+    private static WzImage Image(WzFile wz, string path)
+    {
+        var parts = path.Split('/');
+        var dir = wz.WzDirectory;
+        foreach (var part in parts[..^1]) dir = dir.GetDirectoryByName(part)!;
+        return dir.GetImageByName(parts[^1])!;
+    }
+
+    // ---- what the publisher reads (basedOn, the checks 2, 4 and 5, the published sha256)
+
+    [Fact]
+    public async Task TheJobCarriesBasedOn_TheShaOfThePublishedFile()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET");
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal(SyntheticWz.Sha256(_fx.PublishedWz()), job.GetProperty("basedOn").GetProperty("sha256").GetString());
+        // read again from the job record on disk (a restart of the packer): same answer
+        var record = JsonDocument.Parse(File.ReadAllText(Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!, "job.json"))).RootElement;
+        Assert.Equal(SyntheticWz.Sha256(_fx.PublishedWz()), record.GetProperty("basedOn").GetProperty("sha256").GetString());
     }
 
     [Fact]
-    public async Task PackedWz_OpensWithVersion83AndKeyGms_AndHoldsTheEditedValue()
+    public async Task Verify_ReportsVersionKeyAndTheOpenLinkAndFormatChecks()
     {
-        _fx.WriteImg("owner", "String/Pet.img", "EDITED-VALUE");
-        var job = await _server.PackAndWait();
-        var wzPath = Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!, "String.wz");
-
-        using var wz = new WzFile(wzPath, 83, WzMapleVersion.GMS);
-        Assert.Equal(WzFileParseStatus.Success, wz.ParseWzFile());
-        var pet = wz.WzDirectory.WzImages.Single(i => i.Name == "Pet.img");
-        Assert.True(pet.ParseImage());
-        Assert.Equal("EDITED-VALUE", ((WzStringProperty)pet["who"]!).Value);
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET", img => img.AddProperty(new WzUOLProperty("link", "who")));
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+        var body = await VerifyOk(job);
+        Assert.Equal(83, body.GetProperty("wzVersion").GetInt32());
+        Assert.Equal(0, body.GetProperty("openErrors").GetArrayLength());
+        Assert.Equal(0, body.GetProperty("brokenLinks").GetInt32());
+        Assert.Equal(0, body.GetProperty("unsupportedFormats").GetArrayLength());
     }
 
     [Fact]
-    public async Task Verify_FindsAValueEditedAfterThePack()
+    public async Task Verify_CountsALinkThatLeadsNowhere()
     {
-        var job = await _server.PackAndWait();
-        _fx.WriteImg("owner", "String/Pet.img", "CHANGED-AFTER-PACK");   // the tree no longer matches the packed .wz
-
-        var (status, body) = await _server.Verify(job.GetProperty("jobId").GetString()!);
-
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.False(body.GetProperty("identical").GetBoolean());
-        var diff = Assert.Single(body.GetProperty("diffs").EnumerateArray().ToList());
-        Assert.Equal("String/Pet.img:who", diff.GetProperty("path").GetString());
-        Assert.Equal("changed", diff.GetProperty("kind").GetString());
-        Assert.Equal("string", diff.GetProperty("type").GetString());
-    }
-
-    [Fact]
-    public async Task Verify_ReportsAnImageTheWzLacks_AndOneItHasExtra()
-    {
-        var job = await _server.PackAndWait();
-        File.Delete(Path.Combine(_fx.Img("owner"), "String", "Eqp.img"));              // in the .wz, no longer in the tree
-        _fx.WriteImg("owner", "String/New.img", "late");                                // in the tree, not in the .wz
-
-        var (_, body) = await _server.Verify(job.GetProperty("jobId").GetString()!);
-
-        Assert.False(body.GetProperty("identical").GetBoolean());
-        var diffs = body.GetProperty("diffs").EnumerateArray().Select(d => (d.GetProperty("path").GetString(), d.GetProperty("kind").GetString(), d.GetProperty("type").GetString())).ToList();
-        Assert.Contains(("String/Eqp.img", "added", "image"), diffs);     // the .wz has it, the tree does not
-        Assert.Contains(("String/New.img", "removed", "image"), diffs);   // the tree has it, the .wz does not
-        Assert.Equal(2, diffs.Count);
-    }
-
-    [Fact]
-    public async Task Verify_ADifferentValidWzInPlaceOfThePacked_IsRefused()
-    {
-        var job = await _server.PackAndWait();
-        var id = job.GetProperty("jobId").GetString()!;
-
-        // a second, valid .wz from other content, put where the first one was
-        _fx.WriteImg("owner", "String/Pet.img", "OTHER");
-        var other = await _server.PackAndWait();
-        var otherFile = Path.Combine(_fx.Outbox, other.GetProperty("jobId").GetString()!, "String.wz");
-        File.Copy(otherFile, Path.Combine(_fx.Outbox, id, "String.wz"), overwrite: true);
-
-        var (status, body) = await _server.Verify(id);
-
-        Assert.Equal(HttpStatusCode.Conflict, status);
-        Assert.Equal("output_changed", PackerTestServer.ErrorCode(body));
-    }
-
-    [Fact]
-    public async Task Verify_ADeliberatelyWrongWz_WithItsRecordRewritten_IsCaughtByTheComparison()
-    {
-        // Someone swaps the .wz AND rewrites job.json so the hash matches: only the semantic comparison can still catch it.
-        var good = await _server.PackAndWait();
-        var goodId = good.GetProperty("jobId").GetString()!;
-        _fx.WriteImg("owner", "String/Pet.img", "WRONG");
-        var wrong = await _server.PackAndWait();
-        var wrongFile = Path.Combine(_fx.Outbox, wrong.GetProperty("jobId").GetString()!, "String.wz");
-        var target = Path.Combine(_fx.Outbox, goodId, "String.wz");
-        File.Copy(wrongFile, target, overwrite: true);
-        var jobFile = Path.Combine(_fx.Outbox, goodId, "job.json");
-        var json = JsonSerializer.Deserialize<PackerJobView>(File.ReadAllText(jobFile), PackerJobStore.Json)!;
-        File.WriteAllText(jobFile, JsonSerializer.Serialize(json with
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET", img =>
         {
-            Wz = new PackerWz("String.wz", new FileInfo(target).Length, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(target))).ToLowerInvariant()),
-        }, PackerJobStore.Json));
-        await using var restarted = await PackerTestServer.StartAsync(_fx.Options());   // a new process reads job.json from disk
-        _fx.WriteImg("owner", "String/Pet.img", "Pet.img");                       // the tree says what the first pack packed
+            img.AddProperty(new WzUOLProperty("good", "who"));
+            img.AddProperty(new WzUOLProperty("bad", "nothing/here"));
+        });
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+        var (status, body) = await _server.Verify(job.GetProperty("jobId").GetString()!);
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(1, body.GetProperty("brokenLinks").GetInt32());
+        Assert.Equal(0, body.GetProperty("openErrors").GetArrayLength());
+    }
 
-        var response = await restarted.PostJson("/v1/verify", new { jobId = goodId, person = "owner" });
+    [Fact]
+    public async Task PublishedEndpoint_AnswersTheShaOfThePackersCopy()
+    {
+        var response = await _server.Client.GetAsync("/v1/published?category=String");
         var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
-
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.False(body.GetProperty("identical").GetBoolean());
-        Assert.Contains(body.GetProperty("diffs").EnumerateArray(), d => d.GetProperty("path").GetString() == "String/Pet.img:who");
+        Assert.Equal(SyntheticWz.Sha256(_fx.PublishedWz()), body.GetProperty("sha256").GetString());
+        Assert.Equal(new FileInfo(_fx.PublishedWz()).Length, body.GetProperty("sizeBytes").GetInt64());
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await _server.Client.GetAsync("/v1/published")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await _server.Client.GetAsync("/v1/published?category=..%2FString")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _server.Client.GetAsync("/v1/published?category=Item")).StatusCode);
+    }
+
+    // ---- replace
+
+    [Fact]
+    public async Task Replace_ProducesTheWz_AndTheJobAnswersTheContract()
+    {
+        var source = _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET");
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+
+        Assert.Equal("String", job.GetProperty("category").GetString());
+        Assert.False(job.TryGetProperty("person", out _));
+        var wz = job.GetProperty("wz");
+        Assert.Equal("String.wz", wz.GetProperty("name").GetString());
+        Assert.Equal(new FileInfo(OutWz(job)).Length, wz.GetProperty("sizeBytes").GetInt64());
+        Assert.Equal(SyntheticWz.Sha256(OutWz(job)), wz.GetProperty("sha256").GetString());
+        var published = job.GetProperty("published");
+        Assert.Equal("String.wz", published.GetProperty("name").GetString());
+        Assert.Equal(new FileInfo(_fx.PublishedWz()).Length, published.GetProperty("sizeBytes").GetInt64());
+        Assert.Equal(SyntheticWz.Sha256(_fx.PublishedWz()), published.GetProperty("sha256").GetString());
+        Assert.Equal(1, job.GetProperty("imgCount").GetInt32());
+        Assert.Equal(0, job.GetProperty("warnings").GetArrayLength());
+        Assert.False(job.TryGetProperty("error", out _));
+
+        var file = Assert.Single(job.GetProperty("files").EnumerateArray().ToList());
+        Assert.Equal("String/Pet.img", file.GetProperty("img").GetString());
+        Assert.Equal("owner", file.GetProperty("from").GetString());
+        Assert.Equal("set", file.GetProperty("op").GetString());
+        Assert.Equal("replaced", file.GetProperty("result").GetString());
+        Assert.Equal(SyntheticWz.Sha256(source), file.GetProperty("sha256").GetString());
+        Assert.Equal(new FileInfo(source).Length, file.GetProperty("sizeBytes").GetInt64());
+
+        // the input snapshot holds the exact bytes that were read
+        var snapshot = Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!, "input", "img", "String", "Pet.img");
+        Assert.Equal(File.ReadAllBytes(source), File.ReadAllBytes(snapshot));
     }
 
     [Fact]
-    public async Task Verify_IsAboutThePersonsCopy_ThatIsNamed()
+    public async Task Replace_OneImage_EveryOtherImageIsRawIdentical_AndTheOrderIsKept()
     {
-        var job = await _server.PackAndWait("owner");
-        _fx.WriteImg("friend", "String/Pet.img", "friend-differs");
+        var publishedHash = SyntheticWz.Sha256(_fx.PublishedWz());
+        _fx.WriteImg("owner", "String/Sub/Deep.img", "OWNER-DEEP");
+        var job = await Done(PackerTestServer.Set("String/Sub/Deep.img"));
 
-        var (_, forOwner) = await _server.Verify(job.GetProperty("jobId").GetString()!, "owner");
-        var (_, forFriend) = await _server.Verify(job.GetProperty("jobId").GetString()!, "friend");
+        var before = SyntheticWz.Blocks(_fx.PublishedWz());
+        var after = SyntheticWz.Blocks(OutWz(job));
+        Assert.Equal(before.Keys.OrderBy(k => k), after.Keys.OrderBy(k => k));
+        foreach (var (path, block) in before)
+        {
+            if (path == "Sub/Deep.img") Assert.NotEqual(block.Sha256, after[path].Sha256);
+            else Assert.Equal(block.Sha256, after[path].Sha256);
+        }
+        Assert.Equal(SyntheticWz.StoredOrder(_fx.PublishedWz()), SyntheticWz.StoredOrder(OutWz(job)));
+        Assert.Equal(publishedHash, SyntheticWz.Sha256(_fx.PublishedWz()));   // the published file is never touched
 
-        Assert.True(forOwner.GetProperty("identical").GetBoolean());
-        Assert.False(forFriend.GetProperty("identical").GetBoolean());
+        using var wz = SyntheticWz.Open(OutWz(job));
+        Assert.Equal("OWNER-DEEP", StringOf(Image(wz, "Sub/Deep.img"), "who"));
+        Assert.Equal("Pet.img", StringOf(Image(wz, "Pet.img"), "who"));   // an untouched one still reads
     }
 
     [Fact]
-    public async Task Verify_ListsAtMostMaxDiffs_AndSaysTruncated()
+    public async Task Replace_ThenVerify_IsIdenticalToThePublishedFileExceptTheListedImage()
     {
-        var names = Enumerable.Range(0, 6).Select(i => $"F{i}.img").ToArray();
-        _fx.Populate("owner", "Many", names);
-        var job = await _server.PackAndWait("owner", "Many");
-        foreach (var n in names) _fx.WriteImg("owner", "Many/" + n, "changed-" + n);   // six images now differ
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET");
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
 
-        await using var small = await PackerTestServer.StartAsync(_fx.Options(o => new PackerOptions(PackerFixture.Token, _fx.Roots, _fx.Outbox) { TempRoot = _fx.TempRoot, MaxDiffs = 2 }));
-        var response = await small.PostJson("/v1/verify", new { jobId = job.GetProperty("jobId").GetString(), person = "owner" });
-        var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        var body = await VerifyOk(job);
 
-        Assert.Equal(2, body.GetProperty("diffs").GetArrayLength());
-        Assert.True(body.GetProperty("truncated").GetBoolean());
-        Assert.False(body.GetProperty("identical").GetBoolean());
+        Assert.Equal(1, body.GetProperty("filesCompared").GetInt32());
+        Assert.Equal(6, body.GetProperty("unchangedCompared").GetInt32());   // the other six images of the seven
+        Assert.Equal(0, body.GetProperty("diffs").GetArrayLength());
     }
 
     [Fact]
-    public async Task Verify_OfAnUnknownMalformedOrUnfinishedJob_IsATypedError()
+    public async Task Replace_TakesTheFileFromThePersonWhoChangedIt()
     {
-        var (s1, b1) = await _server.Verify(new string('a', 32));
-        Assert.Equal(HttpStatusCode.NotFound, s1);
-        Assert.Equal("not_found", PackerTestServer.ErrorCode(b1));
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET");
+        _fx.WriteImg("friend", "String/Pet.img", "FRIEND-PET");
+        _fx.WriteImg("friend", "String/Eqp.img", "FRIEND-EQP");
+        var job = await Done(PackerTestServer.Set("String/Pet.img", "friend"), PackerTestServer.Set("String/Eqp.img", "friend"));
 
-        var (s2, b2) = await _server.Verify("../../etc");
-        Assert.Equal(HttpStatusCode.NotFound, s2);
+        using var wz = SyntheticWz.Open(OutWz(job));
+        Assert.Equal("FRIEND-PET", StringOf(Image(wz, "Pet.img"), "who"));
+        Assert.Equal("FRIEND-EQP", StringOf(Image(wz, "Eqp.img"), "who"));
+        await VerifyOk(job);
+    }
 
-        var (s3, b3) = await _server.Verify(new string('a', 32), "stranger");
-        Assert.Equal(HttpStatusCode.BadRequest, s3);
-        Assert.Equal("unknown_source", PackerTestServer.ErrorCode(b3));
+    [Fact]
+    public async Task Replace_AnImageWithCanvasAndSound_KeepsThemAndVerifiesIdentical()
+    {
+        // the published Eqp.img holds a sound and two canvases of its own; the replacement has others
+        var sounds = Directory.CreateTempSubdirectory("pk-sound-").FullName;
+        try
+        {
+            _fx.BuildPublished(content: rel => img =>
+            {
+                SyntheticWz.Content(rel)(img);
+                if (rel == "Eqp.img") img.AddProperty(ImgFixture.Sound("snd", sounds, 10));
+            });
+            _fx.WriteImg("owner", "String/Eqp.img", "NEW-EQP", img =>
+            {
+                img.AddProperty(ImgFixture.Sound("snd", sounds, 77, 16000));
+                img.AddProperty(ImgFixture.PixelCanvas("big", 40, 24, (x, y) => ((byte)(x * 6), (byte)(y * 9), 3, 200)));
+            });
 
-        // a failed job has no .wz
-        Directory.Delete(Path.Combine(_fx.Img("owner"), "String"), true);
-        Directory.CreateDirectory(Path.Combine(_fx.Img("owner"), "String"));
-        var failed = await _server.PackAndWait();
-        Assert.Equal("failed", failed.GetProperty("state").GetString());
-        var (s4, b4) = await _server.Verify(failed.GetProperty("jobId").GetString()!);
-        Assert.Equal(HttpStatusCode.Conflict, s4);
-        Assert.Equal("job_not_done", PackerTestServer.ErrorCode(b4));
+            var job = await Done(PackerTestServer.Set("String/Eqp.img"));
+
+            using (var wz = SyntheticWz.Open(OutWz(job)))
+            {
+                var eqp = Image(wz, "Eqp.img");
+                Assert.True(eqp.ParseImage());
+                Assert.IsType<WzBinaryProperty>(eqp["snd"]);
+                Assert.IsType<WzCanvasProperty>(eqp["big"]);
+                Assert.Equal("NEW-EQP", ((WzStringProperty)eqp["who"]!).Value);
+            }
+            await VerifyOk(job);
+        }
+        finally
+        {
+            try { Directory.Delete(sounds, true); } catch { }
+        }
+    }
+
+    // ---- add
+
+    [Fact]
+    public async Task Add_AppendsTheImageAtTheEndOfItsFolder_AndCreatesMissingFolders()
+    {
+        _fx.WriteImg("owner", "String/Sub/Deeper/Added.img", "ADDED");
+        _fx.WriteImg("owner", "String/New/Fresh.img", "FRESH");
+        _fx.WriteImg("owner", "String/Top.img", "TOP");
+        var job = await Done(PackerTestServer.Set("String/Sub/Deeper/Added.img"), PackerTestServer.Set("String/New/Fresh.img"), PackerTestServer.Set("String/Top.img"));
+
+        Assert.All(job.GetProperty("files").EnumerateArray(), f => Assert.Equal("added", f.GetProperty("result").GetString()));
+        var before = SyntheticWz.Blocks(_fx.PublishedWz());
+        var after = SyntheticWz.Blocks(OutWz(job));
+        Assert.Equal(before.Count + 3, after.Count);
+        foreach (var (path, block) in before) Assert.Equal(block.Sha256, after[path].Sha256);
+
+        var order = SyntheticWz.StoredOrder(OutWz(job));
+        Assert.True(order.IndexOf("Sub/Deeper/Last.img") < order.IndexOf("Sub/Deeper/Added.img"));   // after the images that were there
+        Assert.Equal(SyntheticWz.StoredOrder(_fx.PublishedWz()).Where(order.Contains), order.Where(SyntheticWz.StoredOrder(_fx.PublishedWz()).Contains));   // the old ones in the old order
+        using (var wz = SyntheticWz.Open(OutWz(job)))
+        {
+            Assert.Equal("ADDED", StringOf(Image(wz, "Sub/Deeper/Added.img"), "who"));
+            Assert.Equal("FRESH", StringOf(Image(wz, "New/Fresh.img"), "who"));
+            Assert.Equal("TOP", StringOf(Image(wz, "Top.img"), "who"));
+        }
+        var body = await VerifyOk(job);
+        Assert.Equal(3, body.GetProperty("filesCompared").GetInt32());
+    }
+
+    // ---- remove
+
+    [Fact]
+    public async Task Remove_TakesOnlyTheListedImageOut()
+    {
+        var job = await Done(PackerTestServer.Remove("String/Sub/Other.img"), PackerTestServer.Remove("String/Cash.img", "friend"));
+
+        Assert.All(job.GetProperty("files").EnumerateArray(), f =>
+        {
+            Assert.Equal("removed", f.GetProperty("result").GetString());
+            Assert.False(f.TryGetProperty("sha256", out _));
+        });
+        var before = SyntheticWz.Blocks(_fx.PublishedWz());
+        var after = SyntheticWz.Blocks(OutWz(job));
+        Assert.Equal(before.Keys.Except(new[] { "Sub/Other.img", "Cash.img" }).OrderBy(k => k), after.Keys.OrderBy(k => k));
+        foreach (var (path, block) in after) Assert.Equal(block.Sha256, before[path].Sha256);
+        var body = await VerifyOk(job);
+        Assert.Equal(0, body.GetProperty("filesCompared").GetInt32());
+        Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!, "input", "img")));   // no input image, nothing in the snapshot
+    }
+
+    [Fact]
+    public async Task Remove_TheLastImageOfAFolder_StillGivesAFileThatOpensAndVerifies()
+    {
+        var job = await Done(PackerTestServer.Remove("String/Z/Only.img"));
+
+        using var wz = SyntheticWz.Open(OutWz(job));
+        Assert.Null(wz.WzDirectory.GetDirectoryByName("Z")?.GetImageByName("Only.img"));
+        Assert.Equal(6, SyntheticWz.Blocks(OutWz(job)).Count);
+        await VerifyOk(job);
+    }
+
+    [Fact]
+    public async Task Remove_OfAnImageThePublishedFileLacks_FailsTheJob()
+    {
+        var job = await _server.PackAndWait(PackerTestServer.Remove("String/Nothing.img"));
+
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("image_not_found", job.GetProperty("error").GetProperty("code").GetString());
+        Assert.False(job.TryGetProperty("wz", out _));
+        Assert.Equal(new[] { "job.json" }, Directory.GetFileSystemEntries(Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!)).Select(Path.GetFileName).ToArray());
+    }
+
+    // ---- all three together
+
+    [Fact]
+    public async Task ReplaceAddAndRemoveTogether_ChangeOnlyTheListedImages()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET");
+        _fx.WriteImg("friend", "String/Sub/Deep.img", "FRIEND-DEEP");
+        _fx.WriteImg("owner", "String/Brand/New.img", "BRAND-NEW");
+        var job = await Done(
+            PackerTestServer.Set("String/Pet.img"), PackerTestServer.Set("String/Sub/Deep.img", "friend"), PackerTestServer.Set("String/Brand/New.img"),
+            PackerTestServer.Remove("String/Cash.img"), PackerTestServer.Remove("String/Sub/Deeper/Last.img", "friend"));
+
+        Assert.Equal(new[] { "replaced", "replaced", "added", "removed", "removed" },
+            job.GetProperty("files").EnumerateArray().Select(f => f.GetProperty("result").GetString()).ToArray());
+        Assert.Equal(5, job.GetProperty("imgCount").GetInt32());
+
+        var before = SyntheticWz.Blocks(_fx.PublishedWz());
+        var after = SyntheticWz.Blocks(OutWz(job));
+        var untouched = before.Keys.Except(new[] { "Pet.img", "Sub/Deep.img", "Cash.img", "Sub/Deeper/Last.img" }).ToList();
+        Assert.Equal(3, untouched.Count);   // Eqp, Sub/Other, Z/Only
+        foreach (var path in untouched) Assert.Equal(before[path].Sha256, after[path].Sha256);
+        Assert.Equal(before.Count - 2 + 1, after.Count);
+
+        var body = await VerifyOk(job);
+        Assert.Equal(3, body.GetProperty("filesCompared").GetInt32());
+        Assert.Equal(3, body.GetProperty("unchangedCompared").GetInt32());
+    }
+
+    [Fact]
+    public async Task APackThatListsTheSameImageTwice_OrWithoutACategoryPrefix_IsRefusedBeforeAnythingIsMade()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        var before = PackerFixture.Snapshot(_fx.Temp);
+        foreach (var files in new[]
+        {
+            new[] { PackerTestServer.Set("String/Pet.img"), PackerTestServer.Remove("String/Pet.img") },
+            new[] { PackerTestServer.Set("String/Pet.img"), PackerTestServer.Set("String/pet.img") },
+            new[] { PackerTestServer.Set("Pet.img") },
+            new[] { PackerTestServer.Set("Item/Pet.img") },
+        })
+        {
+            var response = await _server.PostJson("/v1/pack", PackerTestServer.Pack(files));
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+        Assert.Equal(before, PackerFixture.Snapshot(_fx.Temp));
+    }
+
+    // ---- the keys
+
+    [Fact]
+    public async Task AnImgWrittenWithAnotherKey_FailsTheJob_AndNothingIsCopiedAsItIs()
+    {
+        var gmsImg = SyntheticWz.ImgBytes(SyntheticWz.Content("GMS-KEYED"), WzMapleVersion.GMS);
+        ImgFixture.Write(_fx.Root("owner"), "String/Pet.img", gmsImg);
+        var job = await _server.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("bad_image", job.GetProperty("error").GetProperty("code").GetString());
+        Assert.Contains("String/Pet.img", job.GetProperty("error").GetProperty("message").GetString());
+        Assert.False(job.TryGetProperty("wz", out _));
+        Assert.Equal(new[] { "job.json" }, Directory.GetFileSystemEntries(Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!)).Select(Path.GetFileName).ToArray());
+    }
+
+    [Fact]
+    public async Task TheGmsFileIsMadeFromZeroKeyInput_NotACopyOfIt()
+    {
+        var source = _fx.WriteImg("owner", "String/Pet.img", "ZERO-KEY");
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+
+        using var wz = SyntheticWz.Open(OutWz(job));
+        var block = Image(wz, "Pet.img");
+        var blocks = SyntheticWz.Blocks(OutWz(job));
+        var stored = new byte[block.BlockSize];
+        using (var fs = File.OpenRead(OutWz(job))) { fs.Position = block.Offset; fs.ReadExactly(stored); }
+        Assert.NotEqual(File.ReadAllBytes(source), stored);   // another key, so other bytes
+        Assert.True(blocks.ContainsKey("Pet.img"));
+        Assert.Equal("ZERO-KEY", StringOf(block, "who"));
+    }
+
+    // ---- damaged input
+
+    [Theory]
+    [InlineData("garbage")]
+    [InlineData("truncated")]
+    [InlineData("empty")]
+    public async Task ADamagedImage_FailsTheJob_WithoutAPath_AndLeavesNoWz(string kind)
+    {
+        var good = SyntheticWz.ImgBytes(SyntheticWz.Content("GOOD"));
+        var bytes = kind switch
+        {
+            "garbage" => Enumerable.Range(0, 400).Select(i => (byte)(i * 31 + 7)).ToArray(),
+            "truncated" => good[..(good.Length / 2)],
+            _ => Array.Empty<byte>(),
+        };
+        ImgFixture.Write(_fx.Root("owner"), "String/Pet.img", bytes);
+
+        var job = await _server.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("bad_image", job.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain(_fx.Temp, job.ToString());
+        Assert.False(job.TryGetProperty("wz", out _));
+        Assert.False(File.Exists(OutWz(job)));
+        Assert.Equal(new[] { "job.json" }, Directory.GetFileSystemEntries(Path.Combine(_fx.Outbox, job.GetProperty("jobId").GetString()!)).Select(Path.GetFileName).ToArray());
+    }
+
+    [Fact]
+    public async Task APublishedFileThatIsNotAWz_FailsTheJob_AndThePublishedFileIsUntouched()
+    {
+        File.WriteAllText(_fx.PublishedWz(), "this is not a wz file at all");
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        var job = await _server.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("published_unreadable", job.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("this is not a wz file at all", File.ReadAllText(_fx.PublishedWz()));
+    }
+
+    [Fact]
+    public async Task APublishedFileOfAnotherVersionOrKey_IsRefused()
+    {
+        foreach (var (version, key) in new[] { ((short)95, WzMapleVersion.GMS), ((short)83, WzMapleVersion.EMS) })
+        {
+            using (var wz = new WzFile(version, key) { Name = "String.wz" })
+            {
+                var image = new WzImage("Pet.img") { Changed = true };
+                SyntheticWz.Content("p")(image);
+                wz.WzDirectory.AddImage(image);
+                File.Delete(_fx.PublishedWz());
+                wz.SaveToDisk(_fx.PublishedWz());
+            }
+            _fx.WriteImg("owner", "String/Pet.img", "x");
+            var job = await _server.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+            Assert.Equal("failed", job.GetProperty("state").GetString());
+            Assert.Equal("published_unreadable", job.GetProperty("error").GetProperty("code").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task TwoImagesInThePublishedFileThatDifferOnlyInCase_AreRefused()
+    {
+        using (var wz = new WzFile(83, WzMapleVersion.GMS) { Name = "String.wz" })
+        {
+            foreach (var name in new[] { "Pet.img", "pet.img" })
+            {
+                var image = new WzImage(name) { Changed = true };
+                SyntheticWz.Content(name)(image);
+                wz.WzDirectory.AddImage(image);
+            }
+            File.Delete(_fx.PublishedWz());
+            wz.SaveToDisk(_fx.PublishedWz());
+        }
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        var job = await _server.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("ambiguous_name", job.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task APublishedFileThatChangesWhileThePackRuns_IsDetected()
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "x");
+        _server.Service.Probe = (stage, _) =>
+        {
+            if (stage == "packing") File.AppendAllText(_fx.PublishedWz(), "tail");   // changes the size, so the stamp
+        };
+        var job = await _server.PackAndWait(PackerTestServer.Set("String/Pet.img"));
+        Assert.Equal("failed", job.GetProperty("state").GetString());
+        Assert.Equal("published_changed", job.GetProperty("error").GetProperty("code").GetString());
+        Assert.False(job.TryGetProperty("wz", out _));
     }
 }
 #endif

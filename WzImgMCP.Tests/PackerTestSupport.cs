@@ -15,7 +15,7 @@ using WzImgMCP.Viewer;
 
 namespace WzImgMCP.Tests;
 
-/// <summary>Temp area for the packer: the three source roots (each with an img folder), the outbox and a temp root for verify.</summary>
+/// <summary>Temp area for the packer: the three source roots (each with an img folder), the published folder, the outbox and a temp root for verify.</summary>
 internal sealed class PackerFixture : IDisposable
 {
     public const string Token = "pack-kkkkkkkkkkkkkkkkkkkkkkkkkk-0123456789abcdef";
@@ -28,17 +28,20 @@ internal sealed class PackerFixture : IDisposable
         foreach (var name in PackerOptions.SourceNames) Directory.CreateDirectory(Path.Combine(Temp, name, "img"));
         Directory.CreateDirectory(Outbox);
         Directory.CreateDirectory(TempRoot);
+        Directory.CreateDirectory(Published);
     }
 
     public string Root(string source) => Path.Combine(Temp, source);
     public string Img(string source) => Path.Combine(Temp, source, "img");
     public string Outbox => Path.Combine(Temp, "outbox");
+    public string Published => Path.Combine(Temp, "published");
+    public string PublishedWz(string category = Category) => Path.Combine(Published, category + ".wz");
     public string TempRoot => Path.Combine(Temp, "tmp");
     public Dictionary<string, string> Roots => PackerOptions.SourceNames.ToDictionary(n => n, Root);
 
     public PackerOptions Options(Func<PackerOptions, PackerOptions>? tweak = null)
     {
-        var options = new PackerOptions(Token, Roots, Outbox) { TempRoot = TempRoot };
+        var options = new PackerOptions(Token, Roots, Outbox, Published) { TempRoot = TempRoot };
         return tweak?.Invoke(options) ?? options;
     }
 
@@ -49,6 +52,10 @@ internal sealed class PackerFixture : IDisposable
             WriteImg(person, category + "/" + rel, rel);
         ImgFixture.WriteManifest(Root(person), "GMS");
     }
+
+    /// <summary>Writes the published <c>&lt;category&gt;.wz</c> (version 83, key GMS) with the default images or the ones given.</summary>
+    public string BuildPublished(string category = Category, IEnumerable<string>? images = null, Func<string, Action<WzImage>>? content = null)
+        => SyntheticWz.Build(PublishedWz(category), images, content);
 
     public string WriteImg(string person, string relativeToImg, string marker, Action<WzImage>? extra = null)
         => ImgFixture.Write(Root(person), relativeToImg, WzMapleVersion.BMS, img =>
@@ -113,14 +120,18 @@ internal sealed class PackerTestServer : IAsyncDisposable
     public Task<HttpResponseMessage> PostRaw(string url, string body, string contentType = "application/json")
         => Client.PostAsync(url, new StringContent(body, Encoding.UTF8, contentType));
 
-    public static readonly object PackBody = new { person = "owner", category = PackerFixture.Category, wzVersion = 83, key = "GMS" };
+    /// <summary>One file of a pack request.</summary>
+    public static object Set(string img, string from = "owner") => new { img, from, op = "set" };
+    public static object Remove(string img, string from = "owner") => new { img, from, op = "remove" };
 
-    public static object Pack(string person = "owner", string category = PackerFixture.Category) => new { person, category, wzVersion = 83, key = "GMS" };
+    public static object Pack(IEnumerable<object> files, string category = PackerFixture.Category) => new { category, files = files.ToArray(), wzVersion = 83, key = "GMS" };
 
     /// <summary>POST /v1/pack and return the job id (the call must answer 202).</summary>
-    public async Task<string> StartPack(string person = "owner", string category = PackerFixture.Category)
+    public async Task<string> StartPack(params object[] files) => await StartPackIn(PackerFixture.Category, files);
+
+    public async Task<string> StartPackIn(string category, params object[] files)
     {
-        var response = await PostJson("/v1/pack", Pack(person, category));
+        var response = await PostJson("/v1/pack", Pack(files, category));
         var text = await response.Content.ReadAsStringAsync();
         Assert.True(response.StatusCode == HttpStatusCode.Accepted, text);
         using var doc = JsonDocument.Parse(text);
@@ -145,12 +156,12 @@ internal sealed class PackerTestServer : IAsyncDisposable
     }
 
     /// <summary>Pack and wait; returns the finished job.</summary>
-    public async Task<JsonElement> PackAndWait(string person = "owner", string category = PackerFixture.Category, int seconds = 90)
-        => await WaitForJob(await StartPack(person, category), seconds);
+    public async Task<JsonElement> PackAndWait(params object[] files)
+        => await WaitForJob(await StartPack(files));
 
-    public async Task<(HttpStatusCode Status, JsonElement Body)> Verify(string jobId, string person = "owner")
+    public async Task<(HttpStatusCode Status, JsonElement Body)> Verify(string jobId)
     {
-        var response = await PostJson("/v1/verify", new { jobId, person });
+        var response = await PostJson("/v1/verify", new { jobId });
         var text = await response.Content.ReadAsStringAsync();
         return (response.StatusCode, JsonDocument.Parse(text).RootElement.Clone());
     }
