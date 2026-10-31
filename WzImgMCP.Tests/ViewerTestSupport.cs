@@ -178,7 +178,7 @@ internal sealed class ViewerTree : IDisposable
     public string Root(string source) => Path.Combine(Temp, source);
     public Dictionary<string, string> Roots => ViewerOptions.SourceNames.ToDictionary(n => n, Root);
     public const string Token = "tok-kkkkkkkkkkkkkkkkkkkkkkkkkkkk-0123456789abcdef";
-    public ViewerOptions Options(long? maxFileBytes = null, long? cacheBytes = null, TimeSpan? timeout = null, int? maxRequests = null, int? maxDecodes = null)
+    public ViewerOptions Options(long? maxFileBytes = null, long? cacheBytes = null, TimeSpan? timeout = null, int? maxRequests = null, int? maxDecodes = null, int? maxChanges = null)
         => new(Token, Roots)
         {
             MaxFileBytes = maxFileBytes ?? ViewerOptions.DefaultMaxFileMb * 1024L * 1024L,
@@ -186,6 +186,7 @@ internal sealed class ViewerTree : IDisposable
             RequestTimeout = timeout ?? ViewerOptions.DefaultRequestTimeout,
             MaxConcurrentRequests = maxRequests ?? ViewerOptions.DefaultMaxConcurrentRequests,
             MaxDecodes = maxDecodes ?? ViewerOptions.DefaultMaxDecodes,
+            MaxChanges = maxChanges ?? ViewerOptions.DefaultMaxChanges,
         };
     public void Dispose() { try { Directory.Delete(Temp, true); } catch { } }
 }

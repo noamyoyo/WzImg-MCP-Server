@@ -32,6 +32,7 @@ namespace WzImgMCP.Viewer.Diff;
 public sealed class ImageDiffer
 {
     private readonly DiffOptions _options;
+    // For a file that exists on one side only the other field is null; it is then never read (every level has an empty list on that side).
     private readonly LoadedImage _old;
     private readonly LoadedImage _new;
     private readonly CancellationToken _cancellation;
@@ -81,16 +82,25 @@ public sealed class ImageDiffer
         => ex is InvalidDataException or ArgumentException or NotSupportedException or OverflowException
             or IndexOutOfRangeException or InvalidOperationException or IOException;   // IOException includes EndOfStreamException
 
-    private ImageDiffer(LoadedImage old, LoadedImage @new, DiffOptions options, CancellationToken cancellation)
+    private ImageDiffer(LoadedImage? old, LoadedImage? @new, DiffOptions options, CancellationToken cancellation)
     {
-        _old = old;
-        _new = @new;
+        _old = old!;
+        _new = @new!;
         _options = options;
         _cancellation = cancellation;
     }
 
     public static ImageDiffResult Diff(LoadedImage old, LoadedImage @new, DiffOptions options, CancellationToken cancellation)
         => new ImageDiffer(old, @new, options, cancellation).Run();
+
+    /// <summary>
+    /// A file that exists on one side only: the whole image is walked as an added subtree (<paramref name="added"/>: the file is only
+    /// in the person's copy) or a removed one (only in canon). The same rows, pictures and caps as for a subtree that is added or
+    /// removed inside a changed file; no pixel work.
+    /// </summary>
+    public static ImageDiffResult DiffOneSide(LoadedImage image, bool added, DiffOptions options, CancellationToken cancellation)
+        => added ? new ImageDiffer(null, image, options, cancellation).Run()
+                 : new ImageDiffer(image, null, options, cancellation).Run();
 
     private ImageDiffResult Run()
     {
@@ -126,7 +136,8 @@ public sealed class ImageDiffer
         };
     }
 
-    private static IReadOnlyList<WzImageProperty> Top(LoadedImage image) => (IReadOnlyList<WzImageProperty>)image.Image.WzProperties;
+    private static IReadOnlyList<WzImageProperty> Top(LoadedImage? image)
+        => image == null ? Array.Empty<WzImageProperty>() : (IReadOnlyList<WzImageProperty>)image.Image.WzProperties;
 
     private bool Tick()
     {
@@ -242,12 +253,12 @@ public sealed class ImageDiffer
             deeper.Add(new Level(childrenA, childrenB, path));
     }
 
-    private void AddChange(DiffChange change)
+    private bool AddChange(DiffChange change)
     {
         if (_changes.Count >= _options.MaxChanges || !Reserve(ChangeSize(change)))
         {
             _truncated = true;
-            return;
+            return false;
         }
         _changes.Add(change);
         switch (change.Kind)
@@ -256,6 +267,7 @@ public sealed class ImageDiffer
             case "removed": _removed++; break;
             default: _changed++; break;
         }
+        return true;
     }
 
     /// <summary>Adds a canvas entry unless the entry count or the response size cap is reached (then <c>truncated</c>).</summary>
@@ -317,7 +329,7 @@ public sealed class ImageDiffer
                 .Select(n => PropertyValues.NameForOutput(n).Text).ToList();
         bool added = kind == "added";
 
-        AddChange(new DiffChange
+        bool listed = AddChange(new DiffChange
         {
             Path = path.Text, PathTruncated = path.Cut ? true : null, Kind = kind, Type = type,
             Before = added ? null : text, After = added ? text : null,
@@ -326,7 +338,55 @@ public sealed class ImageDiffer
             Children = names,
         });
 
+        // A small branch that only holds a few text values (a new item's name and description in String.wz) also gets one row per
+        // value, so the panel can show "Cap/1004081/name = ...". The collapsed row above stays.
+        if (listed && children.Count > 0 && below <= DiffOptions.MaxExpandNodes && TryCollectTextLeaves(p, path, out var leaves))
+        {
+            foreach (var (leafPath, leaf) in leaves.OrderBy(l => l.Path.Text, StringComparer.Ordinal))
+            {
+                var (leafText, leafCut) = SafeDescribe(leaf, owner);
+                if (!AddChange(new DiffChange
+                {
+                    Path = leafPath.Text, PathTruncated = leafPath.Cut ? true : null, Kind = kind, Type = "string",
+                    Before = added ? null : leafText, After = added ? leafText : null,
+                    BeforeTruncated = !added && leafCut ? true : null, AfterTruncated = added && leafCut ? true : null,
+                }))
+                    break;
+            }
+        }
+
         ListCanvases(path, p, kind, owner);
+    }
+
+    /// <summary>
+    /// True when everything below <paramref name="root"/> is at most <see cref="DiffOptions.MaxExpandLeaves"/> text values (and the
+    /// containers between): no pictures, numbers, vectors or links. Those leaves are returned with their paths.
+    /// </summary>
+    private static bool TryCollectTextLeaves(WzImageProperty root, NodePath rootPath, out List<(NodePath Path, WzImageProperty Leaf)> leaves)
+    {
+        leaves = new List<(NodePath, WzImageProperty)>();
+        var stack = new Stack<(WzImageProperty, NodePath)>();
+        stack.Push((root, rootPath));
+        while (stack.Count > 0)
+        {
+            var (node, path) = stack.Pop();
+            var children = PropertyValues.Children(node);
+            if (children.Count == 0)
+            {
+                if (node == root || PropertyValues.TypeOf(node) != "string" || leaves.Count >= DiffOptions.MaxExpandLeaves)
+                    return false;
+                leaves.Add((path, node));
+                continue;
+            }
+            var groups = Group(children);
+            foreach (var name in groups.Keys)
+            {
+                var list = groups[name];
+                for (int k = 0; k < list.Count; k++)
+                    stack.Push((list[k], path.Child(name, list.Count > 1, k)));
+            }
+        }
+        return leaves.Count > 0;
     }
 
     /// <summary>The canvases in a subtree that is added, removed or replaced are listed (without pixel work), so the panel can show those pictures.</summary>

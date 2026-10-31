@@ -897,5 +897,190 @@ public sealed class ViewerDiffEngineTests : IDisposable
         var truncated = Diff(img => { }, img => { for (int i = 0; i < 5; i++) img.AddProperty(new WzIntProperty($"n{i}", i)); }, new DiffOptions { MaxChanges = 2 });
         Assert.Equal("different", truncated.Semantic);
     }
+
+    // ---- a file that exists on one side only
+
+    private ImageDiffResult DiffOne(Action<WzImage> fill, bool added, DiffOptions? options = null)
+    {
+        var name = $"X{Interlocked.Increment(ref _counter)}.img";
+        var side = added ? "owner" : "canon";
+        ImgFixture.Write(_tree.Root(side), name, ImgFixture.Build(fill));
+        using var lease = _loader.Load(_resolver.Resolve(side, name), CancellationToken.None);
+        return ImageDiffer.DiffOneSide(lease.Loaded, added, options ?? new DiffOptions(), CancellationToken.None);
+    }
+
+    private static WzSubProperty Texts(string name, params (string Name, string Value)[] values)
+    {
+        var s = new WzSubProperty(name);
+        foreach (var (n, v) in values) s.AddProperty(new WzStringProperty(n, v));
+        return s;
+    }
+
+    [Fact]
+    public void OneSide_NewFile_ListsItsPictures_AsAdded()
+    {
+        var r = DiffOne(img =>
+        {
+            img.AddProperty(Anim("stand", 2));
+            img.AddProperty(ImgFixture.PixelCanvas("icon", 5, 6, Solid(30)));
+        }, added: true);
+        Assert.Equal(new[] { ("icon", "added"), ("stand/0", "added"), ("stand/1", "added") }, r.Canvases.Select(c => (c.Path, c.Change)));
+        Assert.All(r.Canvases, c => { Assert.Null(c.Before); Assert.NotNull(c.After); Assert.Equal(c.Path, c.Node); });
+        Assert.Equal(new CanvasInfo(5, 6, 2), r.Canvases[0].After);
+        Assert.Equal(3, r.Summary.CanvasesChanged);
+        Assert.False(r.Truncated);
+        Assert.Empty(r.Warnings);
+        Assert.Equal(new[] { "icon", "stand" }, r.Changes.Select(c => c.Path));   // each top-level node is one row, as inside a changed file
+        Assert.All(r.Changes, c => Assert.Equal("added", c.Kind));
+        Assert.Equal(2, r.Summary.Added);
+    }
+
+    [Fact]
+    public void OneSide_DeletedFile_ListsItsPictures_AsRemoved()
+    {
+        var r = DiffOne(img => img.AddProperty(Anim("stand", 2)), added: false);
+        Assert.Equal(new[] { ("stand/0", "removed"), ("stand/1", "removed") }, r.Canvases.Select(c => (c.Path, c.Change)));
+        Assert.All(r.Canvases, c => { Assert.NotNull(c.Before); Assert.Null(c.After); });
+        Assert.Equal(2, r.Summary.CanvasesChanged);
+        Assert.Equal(1, r.Summary.Removed);
+        Assert.Equal("removed", Assert.Single(r.Changes).Kind);
+        Assert.Empty(r.Warnings);
+    }
+
+    [Fact]
+    public void OneSide_NewFileWithoutPictures_HasNoCanvases_AndNoWarning()
+    {
+        var r = DiffOne(img => { img.AddProperty(new WzIntProperty("a", 1)); img.AddProperty(new WzIntProperty("b", 2)); }, added: true);
+        Assert.Empty(r.Canvases);
+        Assert.Empty(r.Warnings);
+        Assert.False(r.Truncated);
+        Assert.Equal(0, r.Summary.CanvasesChanged);
+
+        var empty = DiffOne(img => { }, added: true);
+        Assert.Empty(empty.Changes);
+        Assert.Empty(empty.Canvases);
+        Assert.Empty(empty.Warnings);
+    }
+
+    [Fact]
+    public void OneSide_PictureCap_StillCuts_AndSaysTruncated()
+    {
+        var r = DiffOne(img => img.AddProperty(Anim("stand", 10)), added: true, new DiffOptions { MaxChanges = 4 });
+        Assert.True(r.Truncated);
+        Assert.Equal(4, r.Canvases.Count);
+        Assert.Equal("stand/0", r.Canvases[0].Path);
+        Assert.Contains(r.Warnings, w => w.Contains("more than 4 changes"));
+    }
+
+    [Fact]
+    public void OneSide_ResponseSizeCap_StillCuts()
+    {
+        var r = DiffOne(img => img.AddProperty(Anim("stand", 10)), added: true, new DiffOptions { MaxResponseBytes = 600 });
+        Assert.True(r.Truncated);
+        Assert.True(r.Canvases.Count < 10);
+        Assert.Contains(r.Warnings, w => w.Contains("response size limit"));
+    }
+
+    [Fact]
+    public void OneSide_SmallTextBranch_GetsLeafRows_AlsoInANewFile()
+    {
+        var r = DiffOne(img => img.AddProperty(Texts("Cap1", ("name", "Dawn Bear Hoodie"), ("desc", "Warm"))), added: true);
+        Assert.Equal(new[] { "Cap1", "Cap1/desc", "Cap1/name" }, r.Changes.Select(c => c.Path));
+        var name = r.Changes.Single(c => c.Path == "Cap1/name");
+        Assert.Equal(("added", "string", "Dawn Bear Hoodie", null), (name.Kind, name.Type, name.After, name.Before));
+    }
+
+    // ---- small added or removed text branches inside a changed file
+
+    private static WzSubProperty StringFile(params (string Id, string Name, string Desc)[] items)
+    {
+        var cap = new WzSubProperty("Cap");
+        foreach (var (id, name, desc) in items) cap.AddProperty(Texts(id, ("name", name), ("desc", desc)));
+        var eqp = new WzSubProperty("Eqp");
+        eqp.AddProperty(cap);
+        return eqp;
+    }
+
+    [Fact]
+    public void SmallAddedTextBranch_InAChangedFile_GetsOneRowPerText()
+    {
+        var r = Diff(
+            img => img.AddProperty(StringFile(("1004080", "Old Hat", "old"))),
+            img => img.AddProperty(StringFile(("1004080", "Old Hat", "old"), ("1004081", "Dawn Bear Hoodie", "Warm hoodie"))));
+        Assert.Equal(new[] { "Eqp/Cap/1004081", "Eqp/Cap/1004081/desc", "Eqp/Cap/1004081/name" }, r.Changes.Select(c => c.Path));
+        var branch = r.Changes[0];
+        Assert.Equal(("added", "sub", 2), (branch.Kind, branch.Type, branch.DescendantCount));
+        Assert.Equal(new[] { "desc", "name" }, branch.Children);   // the collapsed row is kept
+        var name = r.Changes[2];
+        Assert.Equal(("added", "string", "Dawn Bear Hoodie", null, null), (name.Kind, name.Type, name.After, name.Before, name.Detail));
+        Assert.Equal("Warm hoodie", r.Changes[1].After);
+        Assert.Equal(3, r.Summary.Added);
+        Assert.Empty(r.Canvases);
+    }
+
+    [Fact]
+    public void SmallRemovedTextBranch_UsesBefore_AndLongTextIsCutAt200()
+    {
+        var longText = new string('x', 300);
+        var r = Diff(
+            img => img.AddProperty(StringFile(("1", "Hat", longText))),
+            img => img.AddProperty(StringFile()));
+        var desc = r.Changes.Single(c => c.Path == "Eqp/Cap/1/desc");
+        Assert.Equal("removed", desc.Kind);
+        Assert.Null(desc.After);
+        Assert.Equal(DiffOptions.MaxValueChars, desc.Before!.Length);
+        Assert.True(desc.BeforeTruncated);
+        Assert.Equal("Hat", r.Changes.Single(c => c.Path == "Eqp/Cap/1/name").Before);
+    }
+
+    [Fact]
+    public void TextBranchWithSixLeaves_IsExpanded_SevenLeavesStayCollapsed()
+    {
+        Action<WzImage> six = img => img.AddProperty(Texts("six", Enumerable.Range(0, 6).Select(i => ($"t{i}", $"v{i}")).ToArray()));
+        Action<WzImage> seven = img => img.AddProperty(Texts("seven", Enumerable.Range(0, 7).Select(i => ($"t{i}", $"v{i}")).ToArray()));
+        Assert.Equal(7, Diff(img => { }, six).Changes.Count);
+        var only = Only(Diff(img => { }, seven));
+        Assert.Equal(("seven", "added", 7), (only.Path, only.Kind, only.DescendantCount));
+        Assert.Equal(7, only.Children!.Count);
+    }
+
+    [Fact]
+    public void BigAddedBranch_StaysOneCollapsedRow_WithChildrenNames()
+    {
+        var r = Diff(
+            img => img.AddProperty(new WzIntProperty("keep", 1)),
+            img =>
+            {
+                img.AddProperty(new WzIntProperty("keep", 1));
+                img.AddProperty(Texts("many", Enumerable.Range(0, 30).Select(i => ($"t{i:00}", $"v{i}")).ToArray()));
+            });
+        var c = Only(r);
+        Assert.Equal(("many", 30, 20), (c.Path, c.DescendantCount, c.Children!.Count));
+    }
+
+    [Fact]
+    public void TextBranchWithAPictureOrANumber_IsNotExpanded()
+    {
+        var withPicture = Diff(img => { }, img =>
+        {
+            var s = Texts("item", ("name", "Thing"));
+            s.AddProperty(ImgFixture.PixelCanvas("icon", 4, 4, Solid(10)));
+            img.AddProperty(s);
+        });
+        Assert.Equal("item", Only(withPicture).Path);
+        Assert.Equal(new[] { "item/icon" }, withPicture.Canvases.Select(c => c.Path));
+
+        var withNumber = Diff(img => { }, img => { var s = Texts("item", ("name", "Thing")); s.AddProperty(new WzIntProperty("price", 5)); img.AddProperty(s); });
+        Assert.Equal("item", Only(withNumber).Path);
+    }
+
+    [Fact]
+    public void LeafRows_CountAgainstMaxChanges_AndTruncationIsFlagged()
+    {
+        var r = Diff(img => { }, img => img.AddProperty(Texts("b", ("name", "N"), ("desc", "D"))), new DiffOptions { MaxChanges = 2 });
+        Assert.True(r.Truncated);
+        Assert.Equal(new[] { "b", "b/desc" }, r.Changes.Select(c => c.Path));
+        Assert.Contains(r.Warnings, w => w.Contains("more than 2 changes"));
+    }
 }
 #endif

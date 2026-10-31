@@ -82,6 +82,10 @@ public sealed record DiffOptions
     public const int MaxPathChars = 1000;
     /// <summary>Child names listed for a collapsed added or removed subtree.</summary>
     public const int MaxSubtreeNames = 20;
+    /// <summary>An added or removed branch that holds at most this many values, all text, also gets one row per value.</summary>
+    public const int MaxExpandLeaves = 6;
+    /// <summary>...and at most this many nodes below it in all (the values and the containers between).</summary>
+    public const int MaxExpandNodes = 12;
     /// <summary>The library's own limit of pixels per side (MapleLib refuses larger canvases when it parses them).</summary>
     public const int MaxCanvasSide = 32768;
 

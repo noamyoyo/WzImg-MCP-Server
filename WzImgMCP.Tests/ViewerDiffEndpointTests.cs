@@ -571,5 +571,69 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
         Assert.Equal("too_large", body.GetProperty("error").GetProperty("code").GetString());
         Assert.Equal(0, s.App.Services.GetRequiredService<ViewerImageCache>().Count);   // given back, like the loader does
     }
+
+    // ---- a file on one side only lists its content
+
+    [Fact]
+    public async Task AddedFile_ListsItsPictures_WithANodeTheCanvasEndpointServes()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "Character/Cap/01004081.img", Img(1, extraNodes: 2));
+        var s = await Start();
+
+        var (status, body) = await Get(s, "/v1/diff?person=owner&path=Character/Cap/01004081.img");
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("added", body.GetProperty("state").GetString());
+        Assert.Equal("different", body.GetProperty("semantic").GetString());
+        var canvas = Assert.Single(body.GetProperty("canvases").EnumerateArray());
+        Assert.Equal("c", canvas.GetProperty("path").GetString());
+        Assert.Equal("added", canvas.GetProperty("change").GetString());
+        Assert.Equal(8, canvas.GetProperty("after").GetProperty("width").GetInt32());
+        Assert.Equal(JsonValueKind.Null, canvas.GetProperty("before").ValueKind);
+        Assert.Equal(1, body.GetProperty("summary").GetProperty("canvasesChanged").GetInt32());
+        Assert.Equal(4, body.GetProperty("changes").GetArrayLength());   // marker, c, e000, e001
+        Assert.Equal(0, body.GetProperty("warnings").GetArrayLength());
+        Assert.False(body.GetProperty("truncated").GetBoolean());
+        Assert.Equal("c", canvas.GetProperty("node").GetString());
+    }
+
+    [Fact]
+    public async Task RemovedFile_ListsItsPicturesAsRemoved_AndAFileWithoutPicturesStaysEmpty()
+    {
+        ImgFixture.Write(_tree.Root("canon"), "Gone.img", Img(1));
+        ImgFixture.Write(_tree.Root("owner"), "Plain.img", ImgFixture.Build(img => img.AddProperty(new WzIntProperty("a", 1))));
+        var s = await Start();
+
+        var (_, removed) = await Get(s, "/v1/diff?person=owner&path=Gone.img");
+        Assert.Equal("removed", removed.GetProperty("state").GetString());
+        var canvas = Assert.Single(removed.GetProperty("canvases").EnumerateArray());
+        Assert.Equal("removed", canvas.GetProperty("change").GetString());
+        Assert.Equal(8, canvas.GetProperty("before").GetProperty("height").GetInt32());
+        Assert.Equal(JsonValueKind.Null, canvas.GetProperty("after").ValueKind);
+
+        var (_, plain) = await Get(s, "/v1/diff?person=owner&path=Plain.img");
+        Assert.Equal("added", plain.GetProperty("state").GetString());
+        Assert.Equal(0, plain.GetProperty("canvases").GetArrayLength());
+        Assert.Equal(0, plain.GetProperty("warnings").GetArrayLength());   // no "contents are not compared" note any more
+        Assert.Equal(1, plain.GetProperty("changes").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task AddedFile_PictureCap_IsTruncatedWithAWarning()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "Many.img", ImgFixture.Build(img =>
+        {
+            for (int i = 0; i < 12; i++)
+            {
+                byte shade = (byte)i;
+                img.AddProperty(ImgFixture.PixelCanvas($"p{i:00}", 4, 4, (x, y) => (shade, (byte)0, (byte)0, (byte)255)));
+            }
+        }));
+        var s = await Start(_tree.Options(maxChanges: 5));
+
+        var (_, body) = await Get(s, "/v1/diff?person=owner&path=Many.img");
+        Assert.True(body.GetProperty("truncated").GetBoolean());
+        Assert.Equal(5, body.GetProperty("canvases").GetArrayLength());
+        Assert.Contains(body.GetProperty("warnings").EnumerateArray(), w => w.GetString()!.Contains("more than 5 changes"));
+    }
 }
 #endif

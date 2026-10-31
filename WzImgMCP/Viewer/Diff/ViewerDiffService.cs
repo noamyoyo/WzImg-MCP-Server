@@ -74,9 +74,22 @@ public sealed class ViewerDiffService
             var now = Info(newLease, baseHash);
 
             if (oldLease == null || newLease == null)
-                return new DiffResponse(oldLease == null ? "added" : "removed", "different", before, now,
-                    new DiffSummary(0, 0, 0, 0, 0), Array.Empty<DiffChange>(), Array.Empty<CanvasChange>(), false,
-                    new[] { "the file exists on one side only; its contents are not compared" });
+            {
+                // Only one side has the file: its whole content is listed as added (only in the person's copy) or removed (only in canon).
+                bool added = oldLease == null;
+                ImageDiffResult one;
+                try
+                {
+                    one = ImageDiffer.DiffOneSide((added ? newLease : oldLease)!.Loaded, added, _options, cancellationToken);
+                }
+                catch (OutOfMemoryException)
+                {
+                    _loader.Cache.Clear();
+                    throw new ViewerApiException(413, "too_large", "the image needs more memory than the viewer allows");
+                }
+                // the semantic stays "different" even for an empty image: the file itself is added or removed
+                return new DiffResponse(added ? "added" : "removed", "different", before, now, one.Summary, one.Changes, one.Canvases, one.Truncated, one.Warnings);
+            }
 
             if (oldLease.Loaded.Sha256 == newLease.Loaded.Sha256)
                 return new DiffResponse("unchanged", "identical", before, now, new DiffSummary(0, 0, 0, 0, 0),
