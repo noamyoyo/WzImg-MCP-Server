@@ -111,6 +111,89 @@ public sealed class PackerPackVerifyTests : IAsyncLifetime
         Assert.Equal(0, body.GetProperty("openErrors").GetArrayLength());
     }
 
+    // ---- check 4, how a link is followed: from the image top (bare path) OR from the link's own folder; broken only when neither finds it
+
+    private static WzSubProperty Folder(string name, params WzImageProperty[] children)
+    {
+        var folder = new WzSubProperty(name);
+        foreach (var child in children) folder.AddProperty(child);
+        return folder;
+    }
+
+    /// <summary>Packs one image holding what <paramref name="fill"/> adds, verifies, and returns the brokenLinks number.</summary>
+    private async Task<int> BrokenLinksOf(Action<WzImage> fill)
+    {
+        _fx.WriteImg("owner", "String/Pet.img", "OWNER-PET", fill);
+        var job = await Done(PackerTestServer.Set("String/Pet.img"));
+        var (status, body) = await _server.Verify(job.GetProperty("jobId").GetString()!);
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(0, body.GetProperty("openErrors").GetArrayLength());
+        return body.GetProperty("brokenLinks").GetInt32();
+    }
+
+    [Fact]
+    public async Task Links_ABareSiblingFrameLink_IsNotBroken()
+    {
+        // like a pet's stand0/2 -> "0" and chat/4 -> "0": frame N of the same animation, a sibling of the link. The test fixture already puts
+        // canvases "0" and "1" at the image top (the old rule would find those), so the frames here are named 5 and 6 to be found only as siblings.
+        var broken = await BrokenLinksOf(img =>
+        {
+            img.AddProperty(Folder("stand0", new WzIntProperty("5", 1), new WzIntProperty("6", 2),
+                new WzUOLProperty("7", "5"), new WzUOLProperty("8", "6")));
+            img.AddProperty(Folder("chat", new WzIntProperty("5", 1), new WzUOLProperty("9", "5")));
+        });
+        Assert.Equal(0, broken);
+    }
+
+    [Fact]
+    public async Task Links_ABareLinkToANameThatExistsNowhere_IsBroken()
+    {
+        var broken = await BrokenLinksOf(img =>
+        {
+            img.AddProperty(Folder("stand0", new WzIntProperty("5", 1), new WzUOLProperty("7", "5"), new WzUOLProperty("3", "99")));
+            img.AddProperty(Folder("chat", new WzUOLProperty("1", "frame9")));
+        });
+        Assert.Equal(2, broken);   // "99" and "frame9" are in no folder and not at the image top
+    }
+
+    [Fact]
+    public async Task Links_ADotDotLink_IsBrokenOnlyWhenItLeadsNowhere()
+    {
+        var broken = await BrokenLinksOf(img =>
+        {
+            img.AddProperty(Folder("a", new WzIntProperty("x", 1),
+                Folder("b", new WzUOLProperty("ok", "../x"), new WzUOLProperty("okTwoUp", "../../a/x"), new WzUOLProperty("bad", "../nope"))));
+        });
+        Assert.Equal(1, broken);   // only "../nope"
+    }
+
+    [Fact]
+    public async Task Links_APathThatOnlyResolvesFromTheImageTop_IsStillNotBroken()
+    {
+        // the old rule: a bare path is followed from the top of the image, however deep the link sits
+        var broken = await BrokenLinksOf(img =>
+        {
+            img.AddProperty(new WzIntProperty("root0", 1));
+            img.AddProperty(Folder("shared", new WzIntProperty("v", 2)));
+            img.AddProperty(Folder("deep", Folder("inner", new WzUOLProperty("L1", "root0"), new WzUOLProperty("L2", "shared/v"))));
+        });
+        Assert.Equal(0, broken);
+    }
+
+    [Fact]
+    public async Task Links_AtTheImageTopLevel_ResolveFromTheImage()
+    {
+        var broken = await BrokenLinksOf(img =>
+        {
+            img.AddProperty(new WzIntProperty("first", 1));
+            img.AddProperty(Folder("sub", new WzIntProperty("leaf", 2)));
+            img.AddProperty(new WzUOLProperty("toInt", "first"));
+            img.AddProperty(new WzUOLProperty("toLeaf", "sub/leaf"));
+            img.AddProperty(new WzUOLProperty("dangling", "sub/missing"));
+        });
+        Assert.Equal(1, broken);
+    }
+
     [Fact]
     public async Task PublishedEndpoint_AnswersTheShaOfThePackersCopy()
     {

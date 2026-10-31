@@ -813,14 +813,28 @@ public sealed class PackerService
         }
     }
 
-    /// <summary>Follows a UOL the way the library does (a path of names and "..", starting at the property's folder, or at the image when it does not begin with ".."). False when a step finds nothing.</summary>
+    /// <summary>
+    /// Does a UOL lead somewhere? A path of names and "..". It counts as resolved when EITHER rule finds the target: (1) the library's own
+    /// rule, starting at the image when the path does not begin with "..", or at the link's folder when it does; (2) starting at the link's
+    /// own folder, so a bare "0" next to a link means the sibling "0" (frame N of the same animation, as real pet images do). For a path
+    /// that begins with ".." the two rules are the same. False only when neither finds the target.
+    /// </summary>
     private static bool UolResolves(WzUOLProperty uol)
     {
         if (string.IsNullOrEmpty(uol.Value) || uol.Parent == null) return false;
         var paths = uol.Value.Split('/');
-        WzObject? current = uol.Parent;
+        WzObject? start = uol.Parent;
         if (paths[0] != "..")
-            while (current != null && current is not WzImage) current = current.Parent;   // the image that holds the link
+        {
+            WzObject? top = start;
+            while (top != null && top is not WzImage) top = top.Parent;   // the image that holds the link
+            if (Follow(top, paths)) return true;
+        }
+        return Follow(start, paths);   // from the link's own folder
+    }
+
+    private static bool Follow(WzObject? current, string[] paths)
+    {
         foreach (var step in paths)
         {
             if (current == null) return false;
