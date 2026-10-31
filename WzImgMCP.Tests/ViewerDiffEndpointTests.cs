@@ -633,7 +633,49 @@ public sealed class ViewerDiffEndpointTests : IAsyncLifetime
         var (_, body) = await Get(s, "/v1/diff?person=owner&path=Many.img");
         Assert.True(body.GetProperty("truncated").GetBoolean());
         Assert.Equal(5, body.GetProperty("canvases").GetArrayLength());
-        Assert.Contains(body.GetProperty("warnings").EnumerateArray(), w => w.GetString()!.Contains("more than 5 changes"));
+        Assert.Contains(body.GetProperty("warnings").EnumerateArray(), w => w.GetString()!.Contains("more than 5 pictures"));
+    }
+
+    [Fact]
+    public async Task OneSideFile_OutOfMemoryInTheWalk_Is413_AndEmptiesTheCache()
+    {
+        ImgFixture.Write(_tree.Root("owner"), "Huge.img", ImgFixture.Build(img =>
+        {
+            var big = new WzSubProperty("big");
+            for (int i = 0; i < 5000; i++) big.AddProperty(new WzIntProperty($"i{i:0000}", i));
+            img.AddProperty(big);
+        }));
+        var s = await Start();
+        s.App.Services.GetRequiredService<ViewerDiffService>().Probe = _ => throw new OutOfMemoryException();
+
+        var (status, body) = await Get(s, "/v1/diff?person=owner&path=Huge.img");
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, status);
+        Assert.Equal("too_large", body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(0, s.App.Services.GetRequiredService<ViewerImageCache>().Count);
+    }
+
+    [Fact]
+    public async Task RemovedFile_SmallTextBranch_LeafRowsUseBefore()
+    {
+        ImgFixture.Write(_tree.Root("canon"), "String/Gone.img", ImgFixture.Build(img =>
+        {
+            var item = new WzSubProperty("1004081");
+            item.AddProperty(new WzStringProperty("name", "Dawn Bear Hoodie"));
+            item.AddProperty(new WzStringProperty("desc", "Warm"));
+            img.AddProperty(item);
+        }));
+        var s = await Start();
+
+        var (_, body) = await Get(s, "/v1/diff?person=owner&path=String/Gone.img");
+        Assert.Equal("removed", body.GetProperty("state").GetString());
+        var rows = body.GetProperty("changes").EnumerateArray().ToList();
+        Assert.Equal(new[] { "1004081", "1004081/desc", "1004081/name" }, rows.Select(r => r.GetProperty("path").GetString()));
+        var name = rows[2];
+        Assert.Equal("removed", name.GetProperty("kind").GetString());
+        Assert.Equal("string", name.GetProperty("type").GetString());
+        Assert.Equal("Dawn Bear Hoodie", name.GetProperty("before").GetString());
+        Assert.False(name.TryGetProperty("after", out _));
+        Assert.Equal(3, body.GetProperty("summary").GetProperty("removed").GetInt32());
     }
 }
 #endif

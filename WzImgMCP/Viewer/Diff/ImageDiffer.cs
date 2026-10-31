@@ -46,6 +46,7 @@ public sealed class ImageDiffer
     private long _decodedBytes;
     private long _responseBytes;
     private bool _sizeCapped;
+    private bool _changesCapped, _canvasesCapped;   // which list hit MaxChanges, for the warning
 
     /// <summary>A node's path as it is output, and whether any name in it or the whole path was cut.</summary>
     /// <param name="Addressable">True when <see cref="Text"/> can be sent to <c>/v1/canvas</c> as a node unchanged (see <see cref="NodeGrammar"/>).</param>
@@ -117,7 +118,8 @@ public sealed class ImageDiffer
         var warnings = new List<string>();
         if (_timeUp) warnings.Add($"the comparison stopped after {_options.Budget.TotalSeconds:0.##} s; the list is incomplete");
         if (_sizeCapped) warnings.Add($"the listed changes reached the response size limit ({_options.MaxResponseBytes / 1024} KiB); the list is cut");
-        if (_truncated && !_timeUp && !_sizeCapped) warnings.Add($"more than {_options.MaxChanges} changes; the list is cut");
+        if (_changesCapped && !_timeUp && !_sizeCapped) warnings.Add($"more than {_options.MaxChanges} changes; the list is cut");
+        if (_canvasesCapped && !_timeUp && !_sizeCapped) warnings.Add($"more than {_options.MaxChanges} pictures; the list is cut and later entries are not listed");
         if (_budgetSkipped > 0) warnings.Add($"{_budgetSkipped} canvas pair(s) that differ in compressed bytes were not decoded (limit {_options.MaxCanvasDecodes} per request); reported as pixels_unverified");
         if (_bytesSkipped > 0) warnings.Add($"{_bytesSkipped} canvas pair(s) were not decoded: the decoded-bytes budget of {_options.MaxDecodedBytes / (1024 * 1024)} MiB per request was used up; reported as pixels_unverified");
         if (_undecodable > 0) warnings.Add($"{_undecodable} canvas pair(s) could not be verified (too large, damaged or without pixel data); reported as pixels_unverified");
@@ -258,6 +260,7 @@ public sealed class ImageDiffer
         if (_changes.Count >= _options.MaxChanges || !Reserve(ChangeSize(change)))
         {
             _truncated = true;
+            if (_changes.Count >= _options.MaxChanges) _changesCapped = true;
             return false;
         }
         _changes.Add(change);
@@ -276,6 +279,7 @@ public sealed class ImageDiffer
         if (_canvases.Count >= _options.MaxChanges || !Reserve(CanvasSize(canvas)))
         {
             _truncated = true;
+            if (_canvases.Count >= _options.MaxChanges) _canvasesCapped = true;
             return;
         }
         _canvases.Add(canvas);
@@ -370,6 +374,8 @@ public sealed class ImageDiffer
         while (stack.Count > 0)
         {
             var (node, path) = stack.Pop();
+            if (node is WzCanvasProperty)   // a picture (even one holding only a link text such as _inlink) is never a text row
+                return false;
             var children = PropertyValues.Children(node);
             if (children.Count == 0)
             {
@@ -395,19 +401,32 @@ public sealed class ImageDiffer
         bool added = kind == "added";
         foreach (var (canvasPath, canvas) in CanvasesIn(root, path))
         {
-            if (_canvases.Count >= _options.MaxChanges) { _truncated = true; break; }
+            if (_canvases.Count >= _options.MaxChanges) { _truncated = true; _canvasesCapped = true; break; }
             var info = InfoOf(canvas);
             AddCanvas(new CanvasChange(canvasPath.Text, kind, added ? null : info, added ? info : null, canvasPath.Node));
             if (_sizeCapped) break;
         }
     }
 
-    private static IEnumerable<(NodePath Path, WzCanvasProperty Canvas)> CanvasesIn(WzImageProperty root, NodePath rootPath)
+    /// <summary>Called every <see cref="WalkTickNodes"/> nodes of a subtree walk: the time budget and the cancellation apply inside one big entry too. False when the time is up.</summary>
+    private bool WalkTick()
+    {
+        if (_timeUp) return false;
+        _options.Probe?.Invoke("walk");
+        return Tick();
+    }
+
+    private const int WalkTickNodes = 4096;
+
+    private IEnumerable<(NodePath Path, WzCanvasProperty Canvas)> CanvasesIn(WzImageProperty root, NodePath rootPath)
     {
         var stack = new Stack<(WzImageProperty, NodePath)>();
         stack.Push((root, rootPath));
+        int visited = 0;
         while (stack.Count > 0)
         {
+            if (++visited % WalkTickNodes == 0 && !WalkTick())
+                yield break;
             var (p, path) = stack.Pop();
             if (p is WzCanvasProperty c)
                 yield return (path, c);
@@ -421,7 +440,8 @@ public sealed class ImageDiffer
         }
     }
 
-    private static int CountDescendants(WzImageProperty p)
+    /// <summary>The number of nodes below <paramref name="p"/>; when the time is up it stops (the count is then too low and the answer is flagged incomplete).</summary>
+    private int CountDescendants(WzImageProperty p)
     {
         int count = 0;
         var stack = new Stack<WzImageProperty>();
@@ -430,6 +450,8 @@ public sealed class ImageDiffer
         {
             var node = stack.Pop();
             count++;
+            if (count % WalkTickNodes == 0 && !WalkTick())
+                break;
             foreach (var c in PropertyValues.Children(node)) stack.Push(c);
         }
         return count;

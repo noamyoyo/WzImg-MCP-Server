@@ -71,7 +71,7 @@ public sealed record DiffOptions
     public long MaxDecodedBytes { get; init; } = ViewerOptions.DefaultMaxDecodedMb * 1024L * 1024L;
     public long MaxResponseBytes { get; init; } = ViewerOptions.DefaultMaxDiffResponseKb * 1024L;
 
-    /// <summary>Test seam: called with "stage1", "decode" or "value" just before the data of a canvas or value is read (may throw, for instance an IOException or an OutOfMemoryException).</summary>
+    /// <summary>Test seam: called with "stage1", "decode" or "value" just before the data of a canvas or value is read, or "walk" every 4096 nodes of a subtree walk (may throw, for instance an IOException or an OutOfMemoryException).</summary>
     public Action<string>? Probe { get; init; }
 
     /// <summary>Longest value text kept in a change; longer is cut and flagged.</summary>

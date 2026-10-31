@@ -969,7 +969,8 @@ public sealed class ViewerDiffEngineTests : IDisposable
         Assert.True(r.Truncated);
         Assert.Equal(4, r.Canvases.Count);
         Assert.Equal("stand/0", r.Canvases[0].Path);
-        Assert.Contains(r.Warnings, w => w.Contains("more than 4 changes"));
+        Assert.Contains(r.Warnings, w => w.Contains("more than 4 pictures") && w.Contains("later entries are not listed"));
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("changes; the list is cut"));
     }
 
     [Fact]
@@ -1081,6 +1082,88 @@ public sealed class ViewerDiffEngineTests : IDisposable
         Assert.True(r.Truncated);
         Assert.Equal(new[] { "b", "b/desc" }, r.Changes.Select(c => c.Path));
         Assert.Contains(r.Warnings, w => w.Contains("more than 2 changes"));
+    }
+
+    // ---- review fixes
+
+    private static Action<WzImage> ManyInts(int n) => img =>
+    {
+        var big = new WzSubProperty("big");
+        for (int i = 0; i < n; i++) big.AddProperty(new WzIntProperty($"i{i:00000}", i));
+        img.AddProperty(big);
+    };
+
+    [Fact]
+    public void OneSide_HugeEntry_TheWalkChecksCancellation_InBothWalkers()
+    {
+        // 10000 nodes in ONE top-level entry: CountDescendants ticks twice (4096, 8192), then CanvasesIn ticks (the 3rd call is in it)
+        int calls = 0;
+        using var cts = new CancellationTokenSource();
+        var name = $"X{Interlocked.Increment(ref _counter)}.img";
+        ImgFixture.Write(_tree.Root("owner"), name, ImgFixture.Build(ManyInts(10000)));
+        using var lease = _loader.Load(_resolver.Resolve("owner", name), CancellationToken.None);
+        var options = new DiffOptions { Probe = w => { if (w == "walk" && ++calls == 3) cts.Cancel(); } };
+        Assert.Throws<OperationCanceledException>(() => ImageDiffer.DiffOneSide(lease.Loaded, true, options, cts.Token));
+        Assert.Equal(3, calls);   // it stopped at once, it did not walk on
+    }
+
+    [Fact]
+    public void OneSide_HugeEntry_TheTimeBudgetStopsTheWalk_FlaggedTruncated()
+    {
+        int calls = 0;
+        var r = DiffOne(ManyInts(10000), added: true, new DiffOptions
+        {
+            Budget = TimeSpan.FromMilliseconds(300),
+            Probe = w => { if (w == "walk" && ++calls == 1) Thread.Sleep(450); },   // the first 4096 nodes "take" longer than the budget
+        });
+        Assert.True(r.Truncated);
+        Assert.Contains(r.Warnings, w => w.Contains("stopped after"));
+        Assert.Equal(1, calls);   // once the time is up the other walker does not even ask again
+    }
+
+    [Fact]
+    public void TextBranch_HoldingACanvasWithOnlyALink_IsNotExpanded()
+    {
+        var r = Diff(img => { }, img =>
+        {
+            var item = new WzSubProperty("item");
+            var linked = ImgFixture.PixelCanvas("icon", 4, 4, Solid(10));
+            linked.AddProperty(new WzStringProperty("_inlink", "Item/X.img/icon"));
+            item.AddProperty(linked);
+            img.AddProperty(item);
+        });
+        Assert.Equal("item", Only(r).Path);   // no "item/icon/_inlink" text row
+    }
+
+    [Fact]
+    public void OneSide_RemovedFile_SmallTextBranch_UsesBefore()
+    {
+        var r = DiffOne(img => img.AddProperty(Texts("Cap1", ("name", "Old Name"), ("desc", "Old"))), added: false);
+        Assert.Equal(new[] { "Cap1", "Cap1/desc", "Cap1/name" }, r.Changes.Select(c => c.Path));
+        var name = r.Changes.Single(c => c.Path == "Cap1/name");
+        Assert.Equal(("removed", "string", "Old Name", null), (name.Kind, name.Type, name.Before, name.After));
+        Assert.Equal(3, r.Summary.Removed);
+    }
+
+    [Fact]
+    public void OneSide_DuplicateNames_HashNames_AndLinkedCanvases_KeepTheirPathsAndNodes()
+    {
+        var r = DiffOne(img =>
+        {
+            Put(img, ImgFixture.PixelCanvas("dup", 4, 4, Solid(10)));
+            Put(img, ImgFixture.PixelCanvas("dup", 5, 5, Solid(20)));
+            img.AddProperty(ImgFixture.PixelCanvas("a#b", 6, 6, Solid(30)));
+            var linked = ImgFixture.PixelCanvas("lnk", 7, 7, Solid(40));
+            linked.AddProperty(new WzStringProperty("_inlink", "x/y"));
+            img.AddProperty(linked);
+        }, added: true);
+        var byPath = r.Canvases.ToDictionary(c => c.Path);
+        Assert.Equal("dup#0", byPath["dup#0"].Node);   // a duplicate keeps its #k, and the node says which one
+        Assert.Equal("dup#1", byPath["dup#1"].Node);
+        Assert.Equal(new CanvasInfo(5, 5, 2), byPath["dup#1"].After);
+        Assert.Null(byPath["a#b"].Node);                // '#' in a real name: not addressable, no preview
+        Assert.Equal("lnk", byPath["lnk"].Node);        // a linked canvas is listed like any other
+        Assert.Equal(4, r.Canvases.Count);
     }
 }
 #endif
