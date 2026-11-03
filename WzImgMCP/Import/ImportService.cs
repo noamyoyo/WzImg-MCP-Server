@@ -155,7 +155,12 @@ public sealed partial class ImportService : IDisposable
         throw new ImportException("not_found", "There is no import with that id (it may have expired after the retention time, or been undone).");
     }
 
-    private static bool CountsAsStaged(ImportRecord r) => r.Status is not (ImportStatus.Failed or ImportStatus.UndonePartial);
+    /// <summary>
+    /// Whether an import holds one of the staging places. A failed import, a partly undone one and an applied one do not: an applied
+    /// import keeps only its backups and journal (no unpacked images), so it cannot be the reason a new import is refused.
+    /// An interrupted apply does count; it must be undone first.
+    /// </summary>
+    private static bool CountsAsStaged(ImportRecord r) => r.Status is not (ImportStatus.Failed or ImportStatus.UndonePartial or ImportStatus.Applied);
 
     private static bool IsBusyStatus(string status) => status is ImportStatus.Downloading or ImportStatus.Extracting or ImportStatus.Applying;
 
@@ -163,10 +168,29 @@ public sealed partial class ImportService : IDisposable
 
     #region Clean-up
 
-    /// <summary>Deletes imports older than the retention time (measured from creation or from the apply, whichever is later) and old folders nobody knows.</summary>
+    /// <summary>
+    /// Deletes imports older than the retention time (measured from creation or from the apply, whichever is later) and old folders
+    /// nobody knows. Takes the same lock as preview, apply and undo, so it can never delete an import while one of those runs; when
+    /// one is running it does nothing (the next call cleans up). An interrupted apply is never deleted: its backups may be the only
+    /// copy of the original files.
+    /// </summary>
     public int CleanupExpired()
     {
         ImportFs.RequireRoot();
+        if (!_step.Wait(0))
+            return 0;
+        try
+        {
+            return CleanupCore();
+        }
+        finally
+        {
+            _step.Release();
+        }
+    }
+
+    private int CleanupCore()
+    {
         EnsureLoaded();
         int removed = 0;
         var now = Now;
@@ -174,7 +198,7 @@ public sealed partial class ImportService : IDisposable
         lock (_gate)
         {
             expired = _records.Values
-                .Where(r => !IsBusyStatus(r.Status) && now - (r.AppliedUtc.HasValue && r.AppliedUtc > r.CreatedUtc ? r.AppliedUtc.Value : r.CreatedUtc) > _options.Retention)
+                .Where(r => !IsBusyStatus(r.Status) && r.Status != ImportStatus.ApplyInterrupted && now - (r.AppliedUtc.HasValue && r.AppliedUtc > r.CreatedUtc ? r.AppliedUtc.Value : r.CreatedUtc) > _options.Retention)
                 .ToList();
         }
         foreach (var record in expired)
@@ -333,8 +357,11 @@ public sealed partial class ImportService : IDisposable
                 uri, part,
                 name =>
                 {
-                    if (record.Kind == ImportKind.Wz && !categoryKnown)
+                    if (record.Kind != ImportKind.Wz) return;
+                    if (!categoryKnown)
                         record.Category = CategoryFromFileName(name);
+                    else
+                        RequireNameMatchesCategory(name, record.Category!);
                 },
                 (bytes, total) =>
                 {

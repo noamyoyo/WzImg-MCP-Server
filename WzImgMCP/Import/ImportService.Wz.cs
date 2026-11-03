@@ -19,6 +19,12 @@ public sealed partial class ImportService
 
     /// <summary>Test seam: called with "apply:&lt;path&gt;" after each file of an apply is written and checked, and with "undo:&lt;path&gt;" before each file of an undo is handled. May throw.</summary>
     internal Action<string>? StepProbe { get; set; }
+
+    /// <summary>Test seam: called with the tree path just before a file of an apply is swapped (after its backup). May throw.</summary>
+    internal Action<string>? SwapProbe { get; set; }
+
+    /// <summary>Test seam: called with "acquire" before the lock file is taken over or created. May throw.</summary>
+    internal Action<string>? LockProbe { get; set; }
     private const string JournalFile = "journal.jsonl";
 
     #region Category and file checks
@@ -73,6 +79,32 @@ public sealed partial class ImportService
         {
             throw new ImportException("category_unknown", ex.Message + " If the file has been renamed, pass category to import_fetch.");
         }
+    }
+
+    /// <summary>
+    /// A category was given and the link names its file: when that name is another known category (or List/Sound), the two disagree
+    /// and the import is refused. A name that is not a category at all (a renamed copy) is accepted, the given category decides.
+    /// </summary>
+    private void RequireNameMatchesCategory(string? fileName, string category)
+    {
+        if (string.IsNullOrWhiteSpace(fileName) || !fileName.Trim().EndsWith(".wz", StringComparison.OrdinalIgnoreCase))
+            return;
+        var stem = fileName.Trim().Substring(0, fileName.Trim().Length - 3);
+        string named;
+        try
+        {
+            named = ResolveCategory(stem);
+        }
+        catch (ImportException ex) when (ex.Code == "category_refused")
+        {
+            throw new ImportException("category_mismatch", $"You said the file is for {category}, but the link names it {stem}.wz. Nothing was downloaded.");
+        }
+        catch (ImportException)
+        {
+            return;   // not a known category: probably a renamed copy
+        }
+        if (!named.Equals(category, StringComparison.OrdinalIgnoreCase))
+            throw new ImportException("category_mismatch", $"You said the file is for {category}, but the link names it {stem}.wz. Nothing was downloaded.");
     }
 
     private string TreeRoot()
@@ -223,19 +255,20 @@ public sealed partial class ImportService
 
     #region import_preview
 
-    public ImportResultBase Preview(string? id)
+    public ImportResultBase Preview(string? id, bool allowUnreadable = false)
     {
         try
         {
             ImportFs.RequireRoot();
+            RequireId(id);
             CleanupExpired();
             var record = Require(id);
             RequireWzReady(record, "preview");
-            if (!_step.Wait(0))
-                throw new ImportException("busy", "Another import step (preview, apply or undo) is running. Try again in a moment.");
+            EnterStep();
             try
             {
-                return PreviewCore(record);
+                record = Require(id);   // the clean-up needs the step lock too, so from here on the import cannot vanish
+                return PreviewCore(record, allowUnreadable);
             }
             finally
             {
@@ -250,6 +283,12 @@ public sealed partial class ImportService
         {
             return Unexpected(ex);
         }
+    }
+
+    private void EnterStep()
+    {
+        if (!_step.Wait(0))
+            throw new ImportException("busy", "Another import step (preview, apply, undo or clean-up) is running. Try again in a moment.");
     }
 
     private static void RequireWzReady(ImportRecord record, string what)
@@ -269,7 +308,7 @@ public sealed partial class ImportService
         }
     }
 
-    private ImportPreviewResult PreviewCore(ImportRecord record)
+    private ImportPreviewResult PreviewCore(ImportRecord record, bool allowUnreadable)
     {
         RequireWzReady(record, "preview");
         var category = record.Category!;
@@ -417,8 +456,11 @@ public sealed partial class ImportService
         result.Truncated = newImages.Count > cap || changedImages.Count > _options.PreviewMaxImages || unreadable.Count > cap || leftAlone.Count > cap;
         if (result.Truncated)
             warnings.Add("Some lists are cut; the counts are complete and the confirmation covers every image, not only the ones listed.");
+        bool blocked = unreadable.Count > 0 && !allowUnreadable;
         if (unreadable.Count > 0)
-            warnings.Add("Images listed as unreadable are NOT copied by import_apply.");
+            warnings.Add(allowUnreadable
+                ? "Images listed as unreadable are NOT copied by import_apply (skipped, as you asked with allowUnreadable)."
+                : "Images listed as unreadable are NOT copied by import_apply, so no confirmation token is given.");
         if (result.Warnings.Count == 0) result.Warnings = null;
 
         // the token: random, shown once, tied to exactly this plan
@@ -426,16 +468,18 @@ public sealed partial class ImportService
         var fingerprint = Fingerprint(plan);
         lock (_gate)
         {
-            if (plan.Count == 0)
+            if (plan.Count == 0 || blocked)
             {
-                record.TokenHash = null;
+                record.TokenHash = null;   // an earlier token must not survive a newer preview
                 record.PreviewFingerprint = null;
+                record.SkippedUnreadable = null;
             }
             else
             {
                 var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).Replace('+', '-').Replace('/', '_').TrimEnd('=');
                 record.TokenHash = ImportFs.Sha256Text(token);
                 record.PreviewFingerprint = fingerprint;
+                record.SkippedUnreadable = unreadable.Count == 0 ? null : unreadable.OrderBy(u => u.Path, StringComparer.Ordinal).Take(200).Select(u => u.Path + " (" + u.Reason + ")").ToList();
                 result.Token = token;
             }
             record.PreviewedUtc = Now;
@@ -444,6 +488,8 @@ public sealed partial class ImportService
 
         result.NextStep = plan.Count == 0
             ? "Nothing would change: every image is already in the tree. There is nothing to apply."
+            : blocked
+            ? $"{unreadable.Count} image(s) in the upload are unreadable and would be skipped, so no confirmation token was given. Fix the source file and fetch again, or call import_preview(id, allowUnreadable=true) to accept that these images are skipped and get a token. Nothing has been changed."
             : $"If this is right, call import_apply(id, token) with this token. It copies {newCount} new and {changedCount} changed image(s), backs up what it replaces, and works once; a new preview gives a new token. Nothing has been changed yet.";
         return result;
     }
@@ -537,15 +583,16 @@ public sealed partial class ImportService
         try
         {
             ImportFs.RequireRoot();
+            RequireId(id);
             CleanupExpired();
             var record = Require(id);
             RequireWzReady(record, "apply");
             if (string.IsNullOrWhiteSpace(token))
                 throw new ImportException("token_invalid", "A confirmation token is needed. Call import_preview(id) first and pass the token it returns.");
-            if (!_step.Wait(0))
-                throw new ImportException("busy", "Another import step (preview, apply or undo) is running. Try again in a moment.");
+            EnterStep();
             try
             {
+                record = Require(id);
                 return ApplyCore(record, token.Trim());
             }
             finally
@@ -570,10 +617,16 @@ public sealed partial class ImportService
         string? tokenHash; string? fingerprint;
         lock (_gate) { tokenHash = record.TokenHash; fingerprint = record.PreviewFingerprint; }
         if (tokenHash == null || fingerprint == null)
-            throw new ImportException("token_invalid", "There is no valid preview for this import (a token works once, and a new preview replaces the old token). Call import_preview(id) again.");
+            throw new ImportException("token_invalid", "There is no valid preview for this import (a token works once, a new preview replaces the old token, and a preview with unreadable images gives none unless allowUnreadable=true). Call import_preview(id) again.");
         var given = Encoding.UTF8.GetBytes(ImportFs.Sha256Text(token));
         if (!CryptographicOperations.FixedTimeEquals(given, Encoding.UTF8.GetBytes(tokenHash)))
             throw new ImportException("token_invalid", "That token does not belong to the latest preview of this import. Call import_preview(id) again and use the new token.");
+
+        // an earlier import that stopped half way may have left the tree half changed: it must be undone first
+        string? pending;
+        lock (_gate) pending = _records.Values.FirstOrDefault(r => r.Id != record.Id && r.Status == ImportStatus.ApplyInterrupted)?.Id;
+        if (pending != null)
+            throw new ImportException("interrupted_import_pending", $"An earlier import ({pending}) was interrupted while applying and may have left the tree half changed. Undo it first with import_undo({pending}). Nothing was applied.");
 
         var plan = ReadPlan(dir);
         if (Fingerprint(plan) != fingerprint)
@@ -583,6 +636,12 @@ public sealed partial class ImportService
         var categoryDir = TreeCategoryDir(category);
         var extractedDir = FindExtractedCategory(Path.Combine(dir, "extracted"), category)
             ?? throw new ImportException("staging_damaged", "The staged files are missing. Start the import again.");
+
+        // undo data of an earlier attempt must have been cleared (a clean rollback does that); never append to stale entries
+        var journalPath = Path.Combine(dir, JournalFile);
+        var backupRoot = Path.Combine(dir, "backup");
+        if (HasUndoData(dir))
+            throw new ImportException("staging_damaged", "Undo data from an earlier attempt is still there. Use import_undo(id) first. Nothing was applied.");
 
         // 1. the staged files and the tree are exactly what the preview saw
         var changedSince = new List<string>();
@@ -613,43 +672,42 @@ public sealed partial class ImportService
             throw new ImportException("tree_changed", $"{changedSince.Count} file(s) in the tree changed since the preview ({shown}). Nothing was applied. Call import_preview(id) again.");
         }
 
-        // 2. unsaved edits in the editor would later be saved over the imported file
+        // 2. unsaved edits in the editor would later be saved over the imported file (checked again right before each file is swapped)
         var unsaved = UnsavedEdits(category, plan.Select(p => p.TreePath));
         if (unsaved.Count > 0)
             throw new ImportException("unsaved_edits", $"{unsaved.Count} affected image(s) have unsaved edits in the editor ({string.Join(", ", unsaved.Take(5))}). Call save_image or discard_changes for them, then apply again. Nothing was applied.");
 
         RequireFreeSpace(dir, needBytes);
 
-        // 3. go. From here the token is spent.
-        lock (_gate) { record.TokenHash = null; record.Status = ImportStatus.Applying; record.Phase = "applying"; }
-        Save(record);
+        // 3. the lock first: when it cannot be taken nothing has changed, the status stays ready and the token is not spent
         AcquireLock(record.Id);
-        var journalPath = Path.Combine(dir, JournalFile);
         int added = 0, replaced = 0;
         try
         {
+            lock (_gate) { record.TokenHash = null; record.Status = ImportStatus.Applying; record.Phase = "applying"; }   // from here the token is spent
+            Save(record);
+            CleanStrayTemps(categoryDir, plan.Select(p => p.TreePath));
             ImportFs.Confine(journalPath);
-            var backupRoot = Path.Combine(dir, "backup");
             ImportFs.Confine(backupRoot);
             Directory.CreateDirectory(backupRoot);
-            using (var journal = new FileStream(journalPath, FileMode.Append, FileAccess.Write, FileShare.Read))
+            using (var journal = new FileStream(journalPath, FileMode.Create, FileAccess.Write, FileShare.Read))
             using (var writer = new StreamWriter(journal, new UTF8Encoding(false)))
             {
                 foreach (var e in plan)
                 {
                     var target = ImportFs.CombineRelative(categoryDir, e.TreePath);
                     var staged = ImportFs.CombineRelative(extractedDir, e.ImportPath);
+
+                    // an edit started in the editor since the check above: stop before this file is touched
+                    var late = UnsavedEdits(category, new[] { e.TreePath });
+                    if (late.Count > 0)
+                        throw new ImportException("unsaved_edits", $"{Shown(e.TreePath)} got unsaved edits in the editor while the import was running; the import was rolled back. Save or discard the edits, then preview and apply again.");
+
                     var entry = new JournalEntry { Action = e.Action == "new" ? "added" : "replaced", TreePath = e.TreePath, OriginalSha = e.TreeSha, NewSha = e.ImportSha };
-                    List<string>? missingDirs = null;
                     if (e.Action == "new")
-                    {
-                        missingDirs = MissingDirectories(categoryDir, e.TreePath);
-                        entry.CreatedDirs = missingDirs;
-                    }
+                        entry.CreatedDirs = MissingDirectories(categoryDir, e.TreePath);
                     else
-                    {
                         entry.Backup = e.TreePath;
-                    }
 
                     // write ahead: the journal line is on disk before the file is touched
                     writer.WriteLine(JsonSerializer.Serialize(entry));
@@ -671,6 +729,7 @@ public sealed partial class ImportService
                         ImportFs.EnsureDirectories(categoryDir, string.Join("/", e.TreePath.Split('/').SkipLast(1)));
                     }
 
+                    SwapProbe?.Invoke(e.TreePath);
                     ImportFs.CopyAtomic(staged, target, e.ImportSha);
 
                     // the written image must open
@@ -689,14 +748,22 @@ public sealed partial class ImportService
         catch (Exception ex)
         {
             var rolled = RollbackQuietly(record, categoryDir);
-            lock (_gate) { record.Status = ImportStatus.Ready; record.Phase = null; }
-            Save(record);
-            ReleaseLock();
+            lock (_gate)
+            {
+                // A clean rollback gives a clean "ready" import (undo data cleared). If it did not succeed, the backups, the journal
+                // and the lock file stay, and the import is "apply_interrupted": import_undo restores from them.
+                record.Status = rolled ? ImportStatus.Ready : ImportStatus.ApplyInterrupted;
+                record.Phase = null;
+            }
+            try { Save(record); } catch (IOException) { }
+            if (rolled)
+                ReleaseLock();
             RefreshEditor(category);
+            const string notRolled = " Some files could not be put back, so the tree may be half changed. The backups and the lock file were kept; call import_undo(id) to restore from them.";
             if (ex is ImportException ie)
-                throw new ImportException(ie.Code, ie.Message + (rolled ? "" : " Some files could not be put back; use import_undo(id)."));
+                throw new ImportException(ie.Code, ie.Message + (rolled ? "" : notRolled));
             Log(record.Id, "apply failed " + ex.GetType().Name);
-            throw new ImportException("apply_failed", "The import could not be applied and was rolled back." + (rolled ? "" : " Some files could not be put back; use import_undo(id)."));
+            throw new ImportException("apply_failed", "The import could not be applied." + (rolled ? " Everything was put back." : notRolled));
         }
 
         lock (_gate)
@@ -707,14 +774,18 @@ public sealed partial class ImportService
             record.AppliedAdded = added;
             record.AppliedReplaced = replaced;
         }
-        Save(record);
-        ReleaseLock();
+        try { Save(record); } finally { ReleaseLock(); }
+        // an applied import keeps only its backups and journal (for undo); the unpacked images are not needed any more
+        ImportFs.DeleteTree(Path.Combine(dir, "extracted"));
         RefreshEditor(category);
         Log(record.Id, $"applied {added} new, {replaced} replaced");
+        List<string>? skipped; lock (_gate) skipped = record.SkippedUnreadable?.ToList();
         return new ImportApplyResult
         {
             Success = true, Id = record.Id, AddedCount = added, ReplacedCount = replaced,
-            Message = $"Applied: {added} new and {replaced} replaced image(s). The old versions are backed up; import_undo(id) puts them back. The editor's image cache was cleared. Next: pack and test as usual.",
+            SkippedUnreadable = skipped,
+            Message = $"Applied: {added} new and {replaced} replaced image(s). The old versions are backed up; import_undo(id) puts them back (for {_options.Retention.TotalDays:0} days). The editor's image cache was cleared. Next: pack and test as usual."
+                + (skipped is { Count: > 0 } ? $" NOT copied, because they were unreadable: {skipped.Count} image(s), listed in skipped_unreadable." : ""),
         };
 
         bool treeLookupContains(string root, string rel)
@@ -724,6 +795,49 @@ public sealed partial class ImportService
             if (!Directory.Exists(parent)) return false;
             var name = Path.GetFileName(rel);
             return Directory.EnumerateFileSystemEntries(parent).Any(p => Path.GetFileName(p).Equals(name, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    /// <summary>True when a journal with entries or any backup file is on disk.</summary>
+    private static bool HasUndoData(string dir)
+    {
+        var journal = new FileInfo(Path.Combine(dir, JournalFile));
+        if (journal.Exists && journal.Length > 0) return true;
+        var backup = Path.Combine(dir, "backup");
+        return Directory.Exists(backup) && Directory.EnumerateFiles(backup, "*", SearchOption.AllDirectories).Any();
+    }
+
+    private static readonly Regex StrayTemp = new(@"^\.import-[0-9a-f]{32}\.tmp$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Removes temporary files an earlier apply or undo left behind when the server stopped in the middle of a copy. Only files with exactly
+    /// our name pattern (.import-&lt;32 hex digits&gt;.tmp), only plain files, only in the category folder and the folders of the given images.
+    /// </summary>
+    private void CleanStrayTemps(string categoryDir, IEnumerable<string> treePaths)
+    {
+        var folders = new HashSet<string>(StringComparer.Ordinal) { "" };
+        foreach (var p in treePaths)
+        {
+            var parts = p.Split('/');
+            for (int i = 1; i < parts.Length; i++)
+                folders.Add(string.Join("/", parts.Take(i)));
+        }
+        foreach (var rel in folders)
+        {
+            try
+            {
+                var folder = rel.Length == 0 ? categoryDir : ImportFs.CombineRelative(categoryDir, rel);
+                if (!Directory.Exists(folder) || new DirectoryInfo(folder).LinkTarget != null) continue;
+                foreach (var file in new DirectoryInfo(folder).EnumerateFiles())
+                {
+                    if (file.LinkTarget == null && StrayTemp.IsMatch(file.Name))
+                    {
+                        file.Delete();
+                        Log("-", "removed a leftover temporary file");
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ImportException) { }
         }
     }
 
@@ -762,18 +876,38 @@ public sealed partial class ImportService
     private void AcquireLock(string id)
     {
         var path = LockPath;
-        ImportFs.RequireNoLinks(path);
-        // The step gate is held, so no apply or undo of this process owns an existing lock: it is left over from a crash.
-        if (File.Exists(path))
+        bool created = false;
+        try
         {
-            Log(id, "removing a stale lock file");
-            File.Delete(path);
+            ImportFs.RequireNoLinks(path);
+            if (new FileInfo(path).LinkTarget != null)
+                throw new ImportException("lock_failed", "The lock file name is taken by a symbolic link, so no import can start. Remove it (it is called .import-lock, in the allowed folder).");
+            LockProbe?.Invoke("acquire");
+            if (Directory.Exists(path))
+                throw new ImportException("lock_failed", "A folder sits where the lock file .import-lock must go, so no import can start. Remove or rename it.");
+            // The step lock is held, so no apply or undo of this process owns an existing lock: it is left over from a crash.
+            if (File.Exists(path))
+            {
+                Log(id, "removing a stale lock file");
+                File.Delete(path);
+            }
+            var text = JsonSerializer.Serialize(new { import = id, startedUtc = Now.ToString("o") });
+            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            created = true;
+            var bytes = Encoding.UTF8.GetBytes(text);
+            stream.Write(bytes, 0, bytes.Length);
+            stream.Flush(true);
         }
-        var text = JsonSerializer.Serialize(new { import = id, startedUtc = Now.ToString("o") });
-        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
-        var bytes = Encoding.UTF8.GetBytes(text);
-        stream.Write(bytes, 0, bytes.Length);
-        stream.Flush(true);
+        catch (ImportException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (created) { try { File.Delete(path); } catch (Exception) { } }
+            Log(id, "lock failed " + ex.GetType().Name);
+            throw new ImportException("lock_failed", "The lock file .import-lock could not be taken (the folder may be read-only or the old lock file cannot be removed), so no import can start and nothing was changed.");
+        }
     }
 
     private void ReleaseLock()
@@ -784,7 +918,10 @@ public sealed partial class ImportService
             if (File.Exists(path) && new FileInfo(path).LinkTarget == null)
                 File.Delete(path);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ImportException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ImportException)
+        {
+            Log("-", "the lock file could not be removed: " + ex.GetType().Name);
+        }
     }
 
     private ImgFileSystemDataSource? EditorSource()
@@ -835,34 +972,33 @@ public sealed partial class ImportService
         try
         {
             ImportFs.RequireRoot();
+            RequireId(id);
             CleanupExpired();
             var record = Require(id);
 
-            switch (record.Status)
+            if (record.Status is ImportStatus.Downloading or ImportStatus.Extracting)
             {
-                case ImportStatus.Downloading or ImportStatus.Extracting:
-                    CancellationTokenSource? cts;
-                    lock (_gate) _running.TryGetValue(record.Id, out cts);
-                    try { cts?.Cancel(); } catch (ObjectDisposedException) { }
-                    return new ImportUndoResult { Success = true, Id = record.Id, Outcome = "cancelled", StagingDeleted = true, Message = "The import was cancelled and its files are being removed. Nothing in the tree was touched." };
-                case ImportStatus.Applying:
-                    throw new ImportException("busy", "This import is being applied right now. Wait for it to finish, then undo it.");
-                case ImportStatus.Ready or ImportStatus.Failed:
-                    if (!_step.Wait(0))
-                        throw new ImportException("busy", "Another import step is running. Try again in a moment.");
-                    try
-                    {
-                        ImportFs.DeleteTree(DirOf(record.Id));
-                        lock (_gate) _records.Remove(record.Id);
-                    }
-                    finally { _step.Release(); }
-                    return new ImportUndoResult { Success = true, Id = record.Id, Outcome = "discarded", StagingDeleted = true, Message = "Nothing had been applied to the tree. The staged files of this import were deleted." };
+                CancellationTokenSource? cts;
+                lock (_gate) _running.TryGetValue(record.Id, out cts);
+                try { cts?.Cancel(); } catch (ObjectDisposedException) { }
+                return new ImportUndoResult { Success = true, Id = record.Id, Outcome = "cancelled", StagingDeleted = true, Message = "The import was cancelled and its files are being removed. Nothing in the tree was touched." };
             }
+            if (record.Status == ImportStatus.Applying)
+                throw new ImportException("busy", "This import is being applied right now. Wait for it to finish, then undo it.");
 
-            if (!_step.Wait(0))
-                throw new ImportException("busy", "Another import step (preview, apply or undo) is running. Try again in a moment.");
+            EnterStep();
             try
             {
+                record = Require(id);   // the clean-up needs the step lock too, so from here on the import cannot vanish
+                if (record.Status == ImportStatus.Applying)
+                    throw new ImportException("busy", "This import is being applied right now. Wait for it to finish, then undo it.");
+                // Never applied: just discard. If undo data is on disk (a backup may be the only copy of an original), restore instead.
+                if (record.Status is ImportStatus.Ready or ImportStatus.Failed && !HasUndoData(DirOf(record.Id)))
+                {
+                    ImportFs.DeleteTree(DirOf(record.Id));
+                    lock (_gate) _records.Remove(record.Id);
+                    return new ImportUndoResult { Success = true, Id = record.Id, Outcome = "discarded", StagingDeleted = true, Message = "Nothing had been applied to the tree. The staged files of this import were deleted." };
+                }
                 return UndoCore(record);
             }
             finally
@@ -891,15 +1027,19 @@ public sealed partial class ImportService
         if (unsaved.Count > 0)
             throw new ImportException("unsaved_edits", $"{unsaved.Count} affected image(s) have unsaved edits in the editor ({string.Join(", ", unsaved.Take(5))}). Call save_image or discard_changes for them, then undo again. Nothing was changed.");
 
+        // the lock stays after a failed undo of an interrupted apply: the tree may still be half changed
+        bool wasInterrupted = record.Status == ImportStatus.ApplyInterrupted;
         AcquireLock(record.Id);
-        UndoOutcome outcome;
+        UndoOutcome? outcome = null;
         try
         {
+            CleanStrayTemps(categoryDir, entries.Select(e => e.TreePath));
             outcome = UndoEntries(dir, categoryDir, entries);
         }
         finally
         {
-            ReleaseLock();
+            if (outcome != null || !wasInterrupted)
+                ReleaseLock();
         }
         RefreshEditor(category);
 
@@ -910,6 +1050,7 @@ public sealed partial class ImportService
         };
         if (outcome.Skipped.Count == 0)
         {
+            // every replaced file is back to its original (checked by hash for each one), so the backups are no longer the only copy
             result.Outcome = "undone";
             result.StagingDeleted = true;
             result.Message = $"Undone: {outcome.Restored} image(s) restored from backup and {outcome.Removed} added image(s) removed. The staged files were deleted.";
@@ -920,7 +1061,7 @@ public sealed partial class ImportService
         else
         {
             result.Outcome = "partly_undone";
-            result.Message = $"Undone except for {outcome.Skipped.Count} file(s) that were edited after the import; those were left as they are. The backups stay until the clean-up.";
+            result.Message = $"Undone except for {outcome.Skipped.Count} file(s) that were edited after the import or whose backup is missing; those were left as they are. The backups stay until the clean-up.";
             lock (_gate) { record.Status = ImportStatus.UndonePartial; record.Phase = null; }
             Save(record);
             Log(record.Id, "partly undone");
@@ -928,13 +1069,21 @@ public sealed partial class ImportService
         return result;
     }
 
+    /// <summary>
+    /// Puts back everything the journal lists. Only when that was complete (nothing skipped) are the undo data cleared, so that the
+    /// next attempt starts clean; otherwise the journal and the backups stay as they are.
+    /// </summary>
     private bool RollbackQuietly(ImportRecord record, string categoryDir)
     {
         try
         {
             var dir = DirOf(record.Id);
             var outcome = UndoEntries(dir, categoryDir, ReadJournal(dir));
-            return outcome.Skipped.Count == 0;
+            if (outcome.Skipped.Count != 0)
+                return false;
+            File.Delete(Path.Combine(dir, JournalFile));
+            ImportFs.DeleteTree(Path.Combine(dir, "backup"));
+            return !HasUndoData(dir) && !Directory.Exists(Path.Combine(dir, "backup"));
         }
         catch (Exception)
         {

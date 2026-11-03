@@ -37,10 +37,12 @@ public class ImportTools
 
     [McpServerTool(Name = "import_preview"), Description(
         "Dry run for a wz import: lists images that are new, changed (with the properties added, removed and changed), unchanged and unreadable. " +
-        "Images that are in the tree but not in the upload are left alone (an import never deletes). Changes nothing; returns a single-use confirmation token for exactly this preview.")]
+        "Images that are in the tree but not in the upload are left alone (an import never deletes). Changes nothing; returns a single-use confirmation token for exactly this preview. " +
+        "If any image of the upload is unreadable, no token is given unless allowUnreadable is true; then import_apply skips those images and says which.")]
     public string ImportPreview(
-        [Description("The id import_fetch returned")] string id)
-        => _import.Preview(id);
+        [Description("The id import_fetch returned")] string id,
+        [Description("Accept that unreadable images are skipped and still get a confirmation token (default false)")] bool allowUnreadable = false)
+        => _import.Preview(id, allowUnreadable);
 
     [McpServerTool(Name = "import_apply"), Description(
         "Apply a previewed wz import: copies only the new and changed .img files into the tree after backing up what it replaces. Refuses if any affected file changed since the preview, " +

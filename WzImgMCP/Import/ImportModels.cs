@@ -51,6 +51,8 @@ public sealed class ImportRecord
     public DateTime? PreviewedUtc { get; set; }
     public int AppliedAdded { get; set; }
     public int AppliedReplaced { get; set; }
+    /// <summary>Unreadable images the preview that issued the current token said would be skipped (only with allowUnreadable).</summary>
+    public List<string>? SkippedUnreadable { get; set; }
     public List<StagedFile>? Files { get; set; }
     public List<string>? Warnings { get; set; }
 }
@@ -253,6 +255,8 @@ public sealed class ImportApplyResult : ImportResultBase
     public int ReplacedCount { get; set; }
     public string? Message { get; set; }
     public List<string>? Warnings { get; set; }
+    /// <summary>Images of the upload that were unreadable and were NOT copied (the preview was made with allowUnreadable).</summary>
+    public List<string>? SkippedUnreadable { get; set; }
 }
 
 public sealed class ImportUndoResult : ImportResultBase

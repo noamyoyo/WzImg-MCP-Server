@@ -38,12 +38,15 @@ public static class ImportUrlPolicy
             throw new ImportException("bad_url", "The link contains spaces or control characters.");
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
             throw new ImportException("bad_url", "The link is not a valid web address.");
-        Check(uri, options);
+        Check(uri, options, redirect: false);
         return uri;
     }
 
-    /// <summary>Checks one address (the first one, a redirect target or a form target). Does not resolve the name.</summary>
-    public static void Check(Uri uri, ImportOptions options)
+    /// <summary>
+    /// Checks one address. The first link must be on the allowed hosts; a redirect target or the target of Google's virus-scan
+    /// form (<paramref name="redirect"/>) may also be on the redirect hosts. Does not resolve the name.
+    /// </summary>
+    public static void Check(Uri uri, ImportOptions options, bool redirect)
     {
         if (!uri.IsAbsoluteUri)
             throw new ImportException("bad_url", "The link is not a valid web address.");
@@ -56,7 +59,7 @@ public static class ImportUrlPolicy
         var host = uri.IdnHost;
         if (IPAddress.TryParse(host.Trim('[', ']'), out _))
             throw new ImportException("url_not_allowed", "Links to an IP address are not accepted; use the normal link of the file.");
-        if (!options.IsHostAllowed(host))
+        if (!(redirect ? options.IsRedirectHostAllowed(host) : options.IsHostAllowed(host)))
             throw new ImportException("url_not_allowed", $"The host {host} is not on the list of allowed sites ({string.Join(", ", options.AllowedHosts)}).");
     }
 
@@ -303,10 +306,12 @@ public sealed class ImportDownloader
         var current = DriveLinks.Normalize(start);
         int redirects = 0;
         bool formFollowed = false;
+        bool firstHop = true;
 
         while (true)
         {
-            ImportUrlPolicy.Check(current, _options);
+            ImportUrlPolicy.Check(current, _options, redirect: !firstHop);
+            firstHop = false;
             await ImportUrlPolicy.ResolvePublicAsync(current.IdnHost, _resolver, ct).ConfigureAwait(false);
 
             using var request = new HttpRequestMessage(HttpMethod.Get, current);
@@ -337,7 +342,7 @@ public sealed class ImportDownloader
                     var next = location.IsAbsoluteUri ? location : new Uri(current, location);
                     try
                     {
-                        ImportUrlPolicy.Check(next, _options);
+                        ImportUrlPolicy.Check(next, _options, redirect: true);
                     }
                     catch (ImportException ex)
                     {

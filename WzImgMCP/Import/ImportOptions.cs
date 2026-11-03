@@ -9,6 +9,7 @@ namespace WzImgMCP.Import;
 public sealed class ImportOptions
 {
     public const string AllowedHostsVar = "WZIMG_IMPORT_ALLOWED_HOSTS";
+    public const string RedirectHostsVar = "WZIMG_IMPORT_REDIRECT_HOSTS";
     public const string MaxMbVar = "WZIMG_IMPORT_MAX_MB";
     public const string MaxStagedVar = "WZIMG_IMPORT_MAX_STAGED";
     public const string RetentionDaysVar = "WZIMG_IMPORT_RETENTION_DAYS";
@@ -19,11 +20,17 @@ public sealed class ImportOptions
     public const string PreviewMaxImagesVar = "WZIMG_IMPORT_PREVIEW_MAX_IMAGES";
     public const string PreviewMaxEntriesVar = "WZIMG_IMPORT_PREVIEW_MAX_ENTRIES";
 
-    /// <summary>Google Drive: the share page, the old download host, the current download host and the hosts the files are served from.</summary>
-    public const string DefaultAllowedHosts = "drive.google.com,docs.google.com,drive.usercontent.google.com,*.googleusercontent.com";
+    /// <summary>Google Drive: the share page, the old download host and the current download host. The first link must be on one of these.</summary>
+    public const string DefaultAllowedHosts = "drive.google.com,docs.google.com,drive.usercontent.google.com";
 
-    /// <summary>Host names a download may use, and the hosts a redirect may lead to. "*.example.com" matches any sub domain, not example.com itself.</summary>
+    /// <summary>Hosts Drive redirects to for the file itself. Allowed as a redirect target only, never as the first link (they also serve other people's content).</summary>
+    public const string DefaultRedirectHosts = "*.googleusercontent.com";
+
+    /// <summary>Host names the first link may use. "*.example.com" matches any sub domain, not example.com itself.</summary>
     public IReadOnlyList<string> AllowedHosts { get; init; } = ParseHosts(DefaultAllowedHosts);
+
+    /// <summary>Further host names a redirect (or the form of Google's virus-scan page) may lead to, besides <see cref="AllowedHosts"/>.</summary>
+    public IReadOnlyList<string> RedirectHosts { get; init; } = ParseHosts(DefaultRedirectHosts);
 
     /// <summary>Largest download in bytes (the file itself, not what it unpacks to).</summary>
     public long MaxDownloadBytes { get; init; } = 300L * 1024 * 1024;
@@ -71,9 +78,12 @@ public sealed class ImportOptions
         var hosts = string.IsNullOrWhiteSpace(hostsText) ? ParseHosts(DefaultAllowedHosts) : ParseHosts(hostsText);
         if (hosts.Count == 0)
             hosts = ParseHosts(DefaultAllowedHosts);
+        var redirectText = get(RedirectHostsVar);
+        var redirects = string.IsNullOrWhiteSpace(redirectText) ? ParseHosts(DefaultRedirectHosts) : ParseHosts(redirectText);
         return new ImportOptions
         {
             AllowedHosts = hosts,
+            RedirectHosts = redirects,
             MaxDownloadBytes = Whole(get(MaxMbVar), 1, 4096, 300) * 1024L * 1024L,
             MaxStaged = (int)Whole(get(MaxStagedVar), 1, 20, 3),
             Retention = TimeSpan.FromDays(Whole(get(RetentionDaysVar), 1, 60, 7)),
@@ -96,13 +106,18 @@ public sealed class ImportOptions
             .Distinct()
             .ToList();
 
-    /// <summary>True when <paramref name="host"/> (a DNS name, not an IP address) is on the allow-list.</summary>
-    public bool IsHostAllowed(string host)
+    /// <summary>True when <paramref name="host"/> (a DNS name, not an IP address) may be used by the first link.</summary>
+    public bool IsHostAllowed(string host) => Matches(AllowedHosts, host);
+
+    /// <summary>True when a redirect may lead to <paramref name="host"/>: the allowed hosts and the redirect hosts.</summary>
+    public bool IsRedirectHostAllowed(string host) => Matches(AllowedHosts, host) || Matches(RedirectHosts, host);
+
+    private static bool Matches(IReadOnlyList<string> rules, string host)
     {
         if (string.IsNullOrEmpty(host) || IPAddress.TryParse(host.Trim('[', ']'), out _))
             return false;
         host = host.TrimEnd('.').ToLowerInvariant();
-        foreach (var rule in AllowedHosts)
+        foreach (var rule in rules)
         {
             if (rule.StartsWith("*.", StringComparison.Ordinal))
             {
