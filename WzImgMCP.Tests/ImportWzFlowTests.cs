@@ -199,21 +199,36 @@ public sealed class ImportWzFlowTests : IClassFixture<ImportWzData>
     }
 
     [Fact]
-    public async Task Preview_ReportsAnUnreadableImage_AndApplyLeavesItOut()
+    public async Task Preview_WithAnUnreadableImage_GivesNoToken_UnlessAllowUnreadable_AndApplySaysWhatWasSkipped()
     {
         using var env = NewEnv();
         var id = await ReadyAsync(env);
         File.WriteAllBytes(Path.Combine(StagedDir(env, id), "C.img"), new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
 
-        var preview = env.Preview(id);
+        var plain = env.Preview(id);
 
-        Assert.Equal(1, preview.UnreadableCount);
-        Assert.Equal("C.img", preview.UnreadableImages!.Single().Path);
-        Assert.Equal(1, preview.NewCount);   // only Sub/Y
-        Assert.Contains("NOT copied", string.Join(" ", preview.Warnings!));
+        Assert.True(plain.Success, plain.Error);
+        Assert.Equal(1, plain.UnreadableCount);
+        Assert.Equal("C.img", plain.UnreadableImages!.Single().Path);
+        Assert.Equal(1, plain.NewCount);   // only Sub/Y
+        Assert.Null(plain.Token);
+        Assert.Contains("allowUnreadable", plain.NextStep);
+        ImportEnv.AssertRefused(env.Service.Apply(id, "anything"), "token_invalid");
 
-        var apply = Assert.IsType<ImportApplyResult>(env.Service.Apply(id, preview.Token));
+        var accepted = env.Preview(id, allowUnreadable: true);
+        Assert.False(string.IsNullOrEmpty(accepted.Token));
+        Assert.Contains("NOT copied", string.Join(" ", accepted.Warnings!));
+
+        // a later plain preview takes the earlier token away
+        var again = env.Preview(id);
+        Assert.Null(again.Token);
+        ImportEnv.AssertRefused(env.Service.Apply(id, accepted.Token), "token_invalid");
+
+        var final = env.Preview(id, allowUnreadable: true);
+        var apply = Assert.IsType<ImportApplyResult>(env.Service.Apply(id, final.Token));
         Assert.True(apply.Success, apply.Error);
+        Assert.Contains("C.img", Assert.Single(apply.SkippedUnreadable!));
+        Assert.Contains("NOT copied", apply.Message);
         Assert.False(File.Exists(Skill(env, "C.img")));
         Assert.True(File.Exists(Skill(env, "SUB", "Y.img")));
     }
@@ -227,7 +242,7 @@ public sealed class ImportWzFlowTests : IClassFixture<ImportWzData>
         File.CreateSymbolicLink(Skill(env, "C.img"), outside);
         var id = await ReadyAsync(env);
 
-        var preview = env.Preview(id);
+        var preview = env.Preview(id, allowUnreadable: true);
 
         Assert.Contains(preview.UnreadableImages!, u => u.Path == "C.img");
         env.Service.Apply(id, preview.Token);
@@ -299,6 +314,7 @@ public sealed class ImportWzFlowTests : IClassFixture<ImportWzData>
         var oldB = File.ReadAllBytes(Skill(env, "B.img"));
         var oldX = File.ReadAllBytes(Skill(env, "SUB", "X.img"));
         var staged = StagedDir(env, id);
+        var stagedBytes = Directory.GetFiles(staged, "*.img", SearchOption.AllDirectories).ToDictionary(f => Path.GetRelativePath(staged, f), File.ReadAllBytes);
 
         var apply = Assert.IsType<ImportApplyResult>(env.Service.Apply(id, preview.Token));
 
@@ -307,11 +323,11 @@ public sealed class ImportWzFlowTests : IClassFixture<ImportWzData>
         Assert.Equal(2, apply.ReplacedCount);
         var after = TreeSnapshot(env);
         // changed and new images carry the staged bytes
-        Assert.Equal(File.ReadAllBytes(Path.Combine(staged, "B.img")), File.ReadAllBytes(Skill(env, "B.img")));
-        Assert.Equal(File.ReadAllBytes(Path.Combine(staged, "C.img")), File.ReadAllBytes(Skill(env, "C.img")));
+        Assert.Equal(stagedBytes["B.img"], File.ReadAllBytes(Skill(env, "B.img")));
+        Assert.Equal(stagedBytes["C.img"], File.ReadAllBytes(Skill(env, "C.img")));
         // the tree's own spelling of the folder is kept: no second "Sub" next to "SUB"
-        Assert.Equal(File.ReadAllBytes(Path.Combine(staged, "Sub", "X.img")), File.ReadAllBytes(Skill(env, "SUB", "X.img")));
-        Assert.Equal(File.ReadAllBytes(Path.Combine(staged, "Sub", "Y.img")), File.ReadAllBytes(Skill(env, "SUB", "Y.img")));
+        Assert.Equal(stagedBytes[Path.Combine("Sub", "X.img")], File.ReadAllBytes(Skill(env, "SUB", "X.img")));
+        Assert.Equal(stagedBytes[Path.Combine("Sub", "Y.img")], File.ReadAllBytes(Skill(env, "SUB", "Y.img")));
         Assert.False(Directory.Exists(Skill(env, "Sub")));
         // exactly these four paths differ; A, D (tree only), manifest.json and every sidecar are byte-identical
         var differing = after.Keys.Union(before.Keys).Where(k => !before.TryGetValue(k, out var h) || !after.TryGetValue(k, out var h2) || h != h2).OrderBy(k => k).ToArray();
@@ -325,6 +341,9 @@ public sealed class ImportWzFlowTests : IClassFixture<ImportWzData>
         // no half-written files, no lock
         Assert.Empty(Directory.EnumerateFiles(env.Tree, ".import-*", SearchOption.AllDirectories));
         Assert.False(File.Exists(env.LockFile));
+        // the unpacked images are dropped; only the backups and the journal stay for undo
+        Assert.False(Directory.Exists(Path.Combine(env.DirOf(id), "extracted")));
+        Assert.True(File.Exists(Path.Combine(env.DirOf(id), "journal.jsonl")));
         // the editor sees the new image straight away
         Assert.True(env.Session.DataSource.ImageExists("Skill", "C.img"));
         Assert.Equal("B-new", MarkdownTestHelper.GetFirstValue(new PropertyTools(env.Session).GetString("Skill", "B.img", "who"), "value"));
@@ -703,7 +722,7 @@ public sealed class ImportWzFlowTests : IClassFixture<ImportWzData>
     }
 
     [Fact]
-    public async Task Cleanup_CountsAnAppliedImportFromTheApply_AndFreesThePlace()
+    public async Task Cleanup_CountsAnAppliedImportFromTheApply_AndAnAppliedImportHoldsNoPlace()
     {
         using var env = NewEnv(o => new ImportOptions { MaxStaged = 1 });
         var (id, preview) = await PreviewedAsync(env);
@@ -712,12 +731,16 @@ public sealed class ImportWzFlowTests : IClassFixture<ImportWzData>
         env.Clock.Advance(TimeSpan.FromDays(5));                              // ten days since the fetch, five since the apply
         Assert.Equal(ImportStatus.Applied, ((ImportStatusResult)env.Service.GetStatus(id)).Status);
 
-        ImportEnv.AssertRefused(env.Service.Fetch(ImportEnv.ViewLink, "files", null), "too_many_staged");
+        // the applied import keeps only backup/ and the journal, and it does not count against the limit of staged imports
+        Assert.False(Directory.Exists(Path.Combine(env.DirOf(id), "extracted")));
+        env.Web.ServeFile(Direct, PngMaker.Png(), "a.png");
+        var next = await env.FetchAndWait(ImportEnv.ViewLink, "files");
+        Assert.Equal(ImportStatus.Ready, next.Status);
+        ImportEnv.AssertRefused(env.Service.Fetch(ImportEnv.ViewLink, "files", null), "too_many_staged");   // this one does hold the place
+
         env.Clock.Advance(TimeSpan.FromDays(3));                              // eight days since the apply
         ImportEnv.AssertRefused(env.Service.GetStatus(id), "not_found");
         Assert.False(Directory.Exists(env.DirOf(id)));
-        env.Web.ServeFile(Direct, PngMaker.Png(), "a.png");
-        Assert.True(env.Service.Fetch(ImportEnv.ViewLink, "files", null).Success);   // the place is free again
     }
 
     [Fact]

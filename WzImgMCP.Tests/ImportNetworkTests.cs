@@ -22,6 +22,8 @@ public sealed class ImportNetworkTests
     [InlineData("https://drive.google.com.evil.com/a.png", "url_not_allowed")]           // look-alike
     [InlineData("https://evildrive.google.com/a.png", "url_not_allowed")]
     [InlineData("https://googleusercontent.com/a.png", "url_not_allowed")]               // the wildcard needs a sub domain
+    [InlineData("https://doc-0s-ab-docs.googleusercontent.com/docs/x", "url_not_allowed")]   // only a redirect may lead there, never the first link
+    [InlineData("https://lh3.googleusercontent.com/a.png", "url_not_allowed")]
     [InlineData("https://10.0.0.1/a.png", "url_not_allowed")]                            // IP literals
     [InlineData("https://192.168.2.160/a.png", "url_not_allowed")]
     [InlineData("https://[::1]/a.png", "url_not_allowed")]
@@ -41,10 +43,10 @@ public sealed class ImportNetworkTests
     }
 
     [Fact]
-    public void Fetch_AcceptsTheGoogleHostsAndTheirSubdomains()
+    public void Fetch_AcceptsTheThreeDriveHosts()
     {
         using var env = new ImportEnv();
-        foreach (var url in new[] { "https://drive.google.com/uc?id=abcdefghij1", "https://docs.google.com/uc?id=abcdefghij1", "https://doc-0s-ab-docs.googleusercontent.com/docs/x" })
+        foreach (var url in new[] { "https://drive.google.com/uc?id=abcdefghij1", "https://docs.google.com/uc?id=abcdefghij1", "https://drive.usercontent.google.com/download?id=abcdefghij1" })
         {
             var result = env.Service.Fetch(url, "files", null);
             Assert.True(result.Success, result.Error);
@@ -66,6 +68,16 @@ public sealed class ImportNetworkTests
         // a missing or empty value keeps the Drive defaults
         Assert.True(ImportOptions.FromEnvironment(_ => null).IsHostAllowed("drive.google.com"));
         Assert.True(ImportOptions.FromEnvironment(_ => "  ").IsHostAllowed("drive.usercontent.google.com"));
+        // googleusercontent hosts are a redirect target only
+        var defaults = ImportOptions.FromEnvironment(_ => null);
+        Assert.False(defaults.IsHostAllowed("doc-0s.googleusercontent.com"));
+        Assert.True(defaults.IsRedirectHostAllowed("doc-0s.googleusercontent.com"));
+        Assert.True(defaults.IsRedirectHostAllowed("drive.google.com"));
+        Assert.False(defaults.IsRedirectHostAllowed("googleusercontent.com"));
+        Assert.False(defaults.IsRedirectHostAllowed("evil.example.com"));
+        var custom = ImportOptions.FromEnvironment(n => n == ImportOptions.RedirectHostsVar ? "cdn.example.org" : null);
+        Assert.True(custom.IsRedirectHostAllowed("cdn.example.org"));
+        Assert.False(custom.IsRedirectHostAllowed("x.googleusercontent.com"));
     }
 
     [Fact]

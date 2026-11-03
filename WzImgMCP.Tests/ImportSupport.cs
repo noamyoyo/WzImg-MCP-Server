@@ -115,7 +115,7 @@ internal sealed class ImportEnv : IDisposable
 
     public string DirOf(string id) => Path.Combine(Inbox, id);
 
-    public ImportPreviewResult Preview(string id) => Assert.IsType<ImportPreviewResult>(Service.Preview(id));
+    public ImportPreviewResult Preview(string id, bool allowUnreadable = false) => Assert.IsType<ImportPreviewResult>(Service.Preview(id, allowUnreadable));
 
     public void Dispose()
     {
