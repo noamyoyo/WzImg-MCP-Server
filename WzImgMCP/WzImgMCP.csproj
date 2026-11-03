@@ -30,6 +30,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="WzImgMCP.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\MapleLib\MapleLib\MapleLib.csproj" />
   </ItemGroup>
 </Project>
