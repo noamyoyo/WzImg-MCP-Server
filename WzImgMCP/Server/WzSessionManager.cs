@@ -38,6 +38,9 @@ public class WzSessionManager : IDisposable
         }
     }
 
+    /// <summary>Folder of the data source that is open now (as it was given to the open call), or null when none is.</summary>
+    public string? OpenDataPath { get; private set; }
+
     /// <summary>How many data sources this session opened so far (automatic open and init_data_source).</summary>
     public int OpenCount => Volatile.Read(ref _openCount);
 
@@ -141,6 +144,7 @@ public class WzSessionManager : IDisposable
 
         var previous = _dataSource;
         _dataSource = next;
+        OpenDataPath = basePath;
         _parsedImages.Clear();
         previous?.Dispose();
         Interlocked.Increment(ref _openCount);

@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using ModelContextProtocol.Server;
+using WzImgMCP.Import;
 using WzImgMCP.Server;
 using WzImgMCP.Tools;
 using WzImgMCP.Utils;
@@ -70,6 +71,7 @@ class Program
 
         // Register services
         builder.Services.AddSingleton<WzSessionManager>();
+        builder.Services.AddSingleton<ImportService>();
 
         // Configure MCP server with stdio transport
         builder.Services
@@ -104,6 +106,7 @@ class Program
 
         // Register services
         builder.Services.AddSingleton<WzSessionManager>();
+        builder.Services.AddSingleton<ImportService>();
 
         // Session idle timeout (WZIMG_SESSION_IDLE_SECONDS, default 7 days). The library closes a session that has had no
         // request in flight for this long; its default is 2 h, which on Linux lasts only 72 s (see SessionIdleSettings).
