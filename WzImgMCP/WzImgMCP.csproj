@@ -29,6 +29,12 @@
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.4" />
   </ItemGroup>
 
+  <!-- The guides of the get_guide tool: markdown files inside the assembly, so no file has to be mounted next to the app.
+       Resource name: WzImgMCP.Guides.<topic>.md -->
+  <ItemGroup>
+    <EmbeddedResource Include="Guides\*.md" LogicalName="WzImgMCP.Guides.%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="WzImgMCP.Tests" />
   </ItemGroup>
