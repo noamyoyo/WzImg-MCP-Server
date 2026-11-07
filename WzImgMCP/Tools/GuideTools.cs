@@ -20,7 +20,7 @@ public class GuideTools
     }
 
     [McpServerTool(Name = "get_guide", ReadOnly = true), Description(
-        "Read the operating guide of this editor. CALL THIS FIRST for any import, any pack, or any task you are not sure about. " +
+        "Read the operating guide of this editor. CALL THIS FIRST for any import, or any task you are not sure about. " +
         "Without topic it lists the guides and when to use each. With topic it returns that guide as markdown. " +
         "Topics: \"start\" (what this editor is, what reaches players, the tool families, safety habits; read it at the start of a session) and " +
         "\"import-by-link\" (getting a .wz file or PNG sprites into the tree from a Google Drive link, the limits in force, undo, and what each error means). " +

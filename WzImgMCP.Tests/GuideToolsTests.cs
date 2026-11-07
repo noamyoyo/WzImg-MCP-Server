@@ -199,7 +199,7 @@ public sealed class GuideToolsTests
         var description = guide.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
         Assert.Contains("FIRST", description);
         Assert.Contains("import", description);
-        Assert.Contains("pack", description);
+        Assert.DoesNotContain("any pack", description);
         Assert.Contains("not sure", description);
         foreach (var topic in GuideCatalog.Topics)
             Assert.Contains(topic.Name, description);
@@ -362,6 +362,10 @@ public sealed class GuideToolsTests
         Assert.Contains("List.wz", text);
         Assert.Contains("Sound.wz", text);
         Assert.Contains("never deletes", text);
+        Assert.Contains("**current** tree", text);
+        Assert.Contains("EITHER person", text);
+        Assert.Contains("1024 x 1024", text);
+        Assert.Contains("import_preview", text);
         Assert.Contains("Anyone with the link", text);
     }
 }

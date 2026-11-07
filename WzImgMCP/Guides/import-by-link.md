@@ -8,7 +8,9 @@ The editor runs in a closed box and cannot take a big file through the chat. Ins
 | A few PNG sprites, or a zip of PNGs | `kind="files"` | The PNGs are stored in a waiting area. The tree is not touched. You place each one with import_png. |
 | A whole `<Category>.wz` (for example `Skill.wz`) | `kind="wz"` | The file is unpacked and compared with your tree. You see the differences and confirm. |
 
-**Big categories** (Character, Map, Mob, Npc) are bigger than the download cap ({{maxDownloadMb}} MB here). Do not try to upload them whole. Either send the sprites with `kind="files"`, or make a small `<Category>.wz` with the same category name that holds **only the images you changed**. That is safe: an import never deletes images, so everything not in your small file stays as it is.
+**Big files.** Compare the size of your file with the download cap above ({{maxDownloadMb}} MB here). The biggest categories (as of Nov 2026 the published Map and Mob files are well over 1 GB, Character is about 1.2 GB, Npc about 580 MB) are normally over the default cap, and the server owner can raise the cap. If your file is over the cap, do not try to upload it whole. Either send the sprites with `kind="files"`, or make a small `<Category>.wz` with the same category name that holds **only the images you changed**.
+
+Be careful with the small file: a changed image replaces the **whole** `.img` in your tree, so if the small file was built from an older copy of that image, your newer edits to that image are lost. Build it from your **current** tree, and read import_preview before you say yes: for every changed image it lists the properties added, removed and changed, and a removed property there means your newer edit would be lost. An import never deletes images, so everything not in your small file stays as it is.
 
 ## Prepare the link
 1. Put the file on Google Drive. It must be a **file**, not a folder.
@@ -45,6 +47,7 @@ The editor runs in a closed box and cannot take a big file through the chat. Ins
 **First time? Try 3 small PNGs** in a harmless image of your own tree, save, check with view_canvas, and only then do a big batch.
 
 ## Limits (live values of this editor)
+In this list MB means 1024 x 1024 bytes, the same as MiB.
 - Largest download: {{maxDownloadMb}} MB. A download that gets no data for {{stallSeconds}} seconds is stopped; the whole download may take at most {{timeoutSeconds}} seconds.
 - Zip of PNGs: at most {{maxFiles}} files, at most {{maxUnpackedMb}} MB once unpacked, and not packed tighter than {{maxRatio}} to 1 (a tighter zip is refused as a zip bomb).
 - Every PNG: at most {{pngMaxSide}} x {{pngMaxSide}} pixels and {{pngMaxMb}} MiB. File names: letters, digits, space and `_ ( ) + - .`, starting with a letter or digit, ending in `.png`.
@@ -66,7 +69,7 @@ The editor does **not** remember which sprites you placed from an import. import
   - already saved: `delete_property(category, image, path)` for each placed canvas, then `save_image` again.
 
 ## The import lock
-While import_apply or import_undo runs, the editor keeps a lock file named `.import-lock` in your folder, and removes it afterwards. The Pack button on the WZ Editing page refuses to start while that file exists ("An import is being applied. Try again in a minute."). That check is in the publisher, not in this editor. If it never goes away, an import was interrupted: run import_undo on it, or ask the owner. The editor's own edit tools do not honour the lock, so do not edit the affected images while an apply is running.
+While import_apply or import_undo runs, the editor keeps a lock file named `.import-lock` in the folder of the person who is importing, and removes it afterwards. The Pack button on the WZ Editing page refuses to start while that file exists ("An import is being applied. Try again in a minute."). The publisher refuses a pack if EITHER person's folder holds a lock, so an import running in the friend's editor also blocks the owner's pack, and the other way round. That check is in the publisher, not in this editor. If it never goes away, an import was interrupted: run import_undo on it, or ask the owner. The editor's own edit tools do not honour the lock, so do not edit the affected images while an apply is running.
 
 ## When it fails
 Each failure has a short code and a plain sentence. The common ones:
@@ -85,4 +88,4 @@ Each failure has a short code and a plain sentence. The common ones:
 - `lock_failed`: the lock file could not be taken, so nothing was changed. Ask the owner.
 - `interrupted_import_pending`: an earlier apply stopped half way. Run import_undo on the id it names first.
 - `not_found`: the id is wrong, or the import expired.
-If it still fails and you do not understand why, stop and ask the server owner. 
+If it still fails and you do not understand why, stop and ask the server owner.

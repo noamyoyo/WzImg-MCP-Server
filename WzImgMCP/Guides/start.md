@@ -29,6 +29,9 @@ The editor never publishes anything by itself. Packing, testing and publishing a
 6. **Test small first.** Try a change on one harmless image before you do a big batch.
 7. pack_to_wz only writes a .wz file inside your own folder. It does not reach players. The normal route is the Pack button on the WZ Editing page.
 
+## Packing
+The editor does not pack and does not publish. Pack is a button on the WZ Editing page that a person presses after saving. Save your images with save_image first, then tell the person to Refresh and Pack. (pack_to_wz is not that button.)
+
 ## If something goes wrong
 - A tool says "No data source initialized": call init_data_source with the folder the owner gave you.
 - A change looks wrong and is not saved yet: discard_changes (category, image).
